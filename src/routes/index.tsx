@@ -1,5 +1,6 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
+import { SIZES, stockLabel, useInventory, type Size } from "@/lib/inventory";
 import heroHoodie from "@/assets/hero-hoodie.jpg";
 import zipupHoodie from "@/assets/zipup-hoodie.jpg";
 import pulloverHoodie from "@/assets/pullover-hoodie.jpg";
@@ -44,7 +45,8 @@ const products = [
 function Index() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [cart, setCart] = useState<{ id: string; size: string; name: string }[]>([]);
-  const [selectedSizes, setSelectedSizes] = useState<Record<string, string>>({
+  const { inventory, decrementStock } = useInventory();
+  const [selectedSizes, setSelectedSizes] = useState<Record<string, Size>>({
     "vayu-zipup": "M",
     "agni-pullover": "L",
   });
@@ -54,12 +56,14 @@ function Index() {
     const product = products.find((p) => p.id === productId);
     if (!product) return;
     const size = selectedSizes[productId] ?? "M";
+    if ((inventory[productId]?.[size] ?? 0) <= 0) return;
+    decrementStock(productId, size);
     setCart((prev) => [...prev, { id: productId, size, name: product.name }]);
     setAddedPulse(productId);
     setTimeout(() => setAddedPulse(null), 900);
   };
 
-  const setSize = (productId: string, size: string) => {
+  const setSize = (productId: string, size: Size) => {
     setSelectedSizes((prev) => ({ ...prev, [productId]: size }));
   };
 
@@ -208,32 +212,67 @@ function Index() {
 
               <div className="flex items-center justify-between mb-6">
                 <div className="flex gap-2">
-                  {["S", "M", "L", "XL"].map((size) => (
-                    <button
-                      key={size}
-                      onClick={() => setSize(product.id, size)}
-                      className={`size-10 flex items-center justify-center text-xs font-bold uppercase transition-all border ${
-                        selectedSizes[product.id] === size
-                          ? "bg-brand-white text-brand-black border-brand-white"
-                          : "bg-transparent text-brand-white border-white/20 hover:border-brand-white"
-                      }`}
-                      aria-label={`Select size ${size}`}
-                    >
-                      {size}
-                    </button>
-                  ))}
+                  {SIZES.map((size) => {
+                    const qty = inventory[product.id]?.[size] ?? 0;
+                    const soldOut = qty <= 0;
+                    return (
+                      <button
+                        key={size}
+                        onClick={() => setSize(product.id, size)}
+                        disabled={soldOut}
+                        className={`size-10 flex items-center justify-center text-xs font-bold uppercase transition-all border relative ${
+                          soldOut
+                            ? "bg-transparent text-muted-foreground border-white/10 cursor-not-allowed line-through"
+                            : selectedSizes[product.id] === size
+                              ? "bg-brand-white text-brand-black border-brand-white"
+                              : "bg-transparent text-brand-white border-white/20 hover:border-brand-white"
+                        }`}
+                        aria-label={soldOut ? `Size ${size} sold out` : `Select size ${size}`}
+                      >
+                        {size}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
+              {(() => {
+                const size = selectedSizes[product.id] ?? "M";
+                const status = stockLabel(inventory[product.id]?.[size] ?? 0);
+                return (
+                  <p
+                    className={`mb-4 text-xs font-bold uppercase tracking-widest ${
+                      status.tone === "low"
+                        ? "text-brand-red animate-pulse"
+                        : status.tone === "out"
+                          ? "text-muted-foreground"
+                          : "text-brand-white/70"
+                    }`}
+                    aria-live="polite"
+                  >
+                    {status.tone === "low" && <span className="mr-2">●</span>}
+                    {status.text}
+                    {status.tone !== "out" && <span className="text-muted-foreground"> · Size {size}</span>}
+                  </p>
+                );
+              })()}
+
               <button
                 onClick={() => addToCart(product.id)}
+                disabled={(inventory[product.id]?.[selectedSizes[product.id] ?? "M"] ?? 0) <= 0}
                 className={`w-full py-4 font-display font-extrabold uppercase tracking-wider transition-all duration-300 ${
-                  addedPulse === product.id
+                  (inventory[product.id]?.[selectedSizes[product.id] ?? "M"] ?? 0) <= 0
+                    ? "bg-brand-grey text-muted-foreground cursor-not-allowed"
+                    : addedPulse === product.id
                     ? "bg-brand-red text-brand-white"
                     : "bg-brand-white text-brand-black hover:bg-brand-red hover:text-brand-white"
                 }`}
               >
-                {addedPulse === product.id ? "Added to Bag" : "Add to Bag"}
+                {(inventory[product.id]?.[selectedSizes[product.id] ?? "M"] ?? 0) <= 0
+                  ? "Sold Out"
+                  : addedPulse === product.id
+                    ? "Added to Bag"
+                    : "Add to Bag"}
               </button>
             </div>
           ))}
@@ -273,6 +312,9 @@ function Index() {
             <a href="mailto:hello@thedivinewithin.com" className="text-muted-foreground hover:text-brand-white transition-colors">
               Contact Us
             </a>
+            <Link to="/admin" className="text-muted-foreground hover:text-brand-white transition-colors">
+              Inventory Manager
+            </Link>
           </div>
           <div className="flex flex-col space-y-6">
             <span className="text-xs font-bold uppercase tracking-widest text-brand-red">Secure Checkout</span>
