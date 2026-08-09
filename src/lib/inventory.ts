@@ -70,7 +70,7 @@ export function useInventory() {
       setInventory((prev) => {
         const next: Inventory = {
           ...prev,
-          [productId]: { ...prev[productId], [size]: Math.max(0, Math.floor(quantity) || 0) },
+          [productId]: { ...prev[productId], [size]: Math.max(0, Math.floor(quantity) || 0) } as Record<Size, number>,
         };
         try {
           localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
@@ -89,7 +89,7 @@ export function useInventory() {
       if (current <= 0) return prev;
       const next: Inventory = {
         ...prev,
-        [productId]: { ...prev[productId], [size]: current - 1 },
+        [productId]: { ...prev[productId], [size]: current - 1 } as Record<Size, number>,
       };
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
