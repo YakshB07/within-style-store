@@ -312,6 +312,9 @@ function Index() {
             <a href="mailto:hello@thedivinewithin.com" className="text-muted-foreground hover:text-brand-white transition-colors">
               Contact Us
             </a>
+            <Link to="/admin" className="text-muted-foreground hover:text-brand-white transition-colors">
+              Inventory Manager
+            </Link>
           </div>
           <div className="flex flex-col space-y-6">
             <span className="text-xs font-bold uppercase tracking-widest text-brand-red">Secure Checkout</span>
