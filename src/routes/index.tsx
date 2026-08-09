@@ -1,5 +1,6 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
+import { SIZES, stockLabel, useInventory, type Size } from "@/lib/inventory";
 import heroHoodie from "@/assets/hero-hoodie.jpg";
 import zipupHoodie from "@/assets/zipup-hoodie.jpg";
 import pulloverHoodie from "@/assets/pullover-hoodie.jpg";
@@ -44,7 +45,8 @@ const products = [
 function Index() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [cart, setCart] = useState<{ id: string; size: string; name: string }[]>([]);
-  const [selectedSizes, setSelectedSizes] = useState<Record<string, string>>({
+  const { inventory, decrementStock } = useInventory();
+  const [selectedSizes, setSelectedSizes] = useState<Record<string, Size>>({
     "vayu-zipup": "M",
     "agni-pullover": "L",
   });
@@ -54,12 +56,14 @@ function Index() {
     const product = products.find((p) => p.id === productId);
     if (!product) return;
     const size = selectedSizes[productId] ?? "M";
+    if ((inventory[productId]?.[size] ?? 0) <= 0) return;
+    decrementStock(productId, size);
     setCart((prev) => [...prev, { id: productId, size, name: product.name }]);
     setAddedPulse(productId);
     setTimeout(() => setAddedPulse(null), 900);
   };
 
-  const setSize = (productId: string, size: string) => {
+  const setSize = (productId: string, size: Size) => {
     setSelectedSizes((prev) => ({ ...prev, [productId]: size }));
   };
 
