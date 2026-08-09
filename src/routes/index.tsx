@@ -53,7 +53,8 @@ function Index() {
   const addToCart = (productId: string) => {
     const product = products.find((p) => p.id === productId);
     if (!product) return;
-    setCart((prev) => [...prev, { id: productId, size: selectedSizes[productId], name: product.name }]);
+    const size = selectedSizes[productId] ?? "M";
+    setCart((prev) => [...prev, { id: productId, size, name: product.name }]);
     setAddedPulse(productId);
     setTimeout(() => setAddedPulse(null), 900);
   };
