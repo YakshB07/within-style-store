@@ -1,4 +1,4 @@
-import { createStart, createCsrfMiddleware, createMiddleware } from "@tanstack/react-start";
+import { createStart, createMiddleware } from "@tanstack/react-start";
 
 import { renderErrorPage } from "./lib/error-page";
 import { applySecurityHeaders } from "./lib/security";
@@ -16,13 +16,6 @@ const errorMiddleware = createMiddleware().server(async ({ next }) => {
       headers: { "content-type": "text/html; charset=utf-8" },
     });
   }
-});
-
-// Start installs this automatically when src/start.ts is absent; defining the
-// file opts out, so re-add it explicitly to keep server functions protected
-// from cross-site requests.
-const csrfMiddleware = createCsrfMiddleware({
-  filter: (ctx) => ctx.handlerType === "serverFn",
 });
 
 const securityHeadersMiddleware = createMiddleware().server(async ({ next, request }) => {
@@ -55,5 +48,5 @@ const securityHeadersMiddleware = createMiddleware().server(async ({ next, reque
 });
 
 export const startInstance = createStart(() => ({
-  requestMiddleware: [errorMiddleware, csrfMiddleware, securityHeadersMiddleware],
+  requestMiddleware: [errorMiddleware, securityHeadersMiddleware],
 }));
