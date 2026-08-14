@@ -100,7 +100,13 @@ export function useInventory() {
     });
   }, []);
 
-  const reset = useCallback(() => persist(DEFAULT_INVENTORY), [persist]);
+  const reset = useCallback(() => {
+    const zeroed: Inventory = {
+      "vayu-zipup": { S: 0, M: 0, L: 0, XL: 0 },
+      "agni-pullover": { S: 0, M: 0, L: 0, XL: 0 },
+    };
+    persist(zeroed);
+  }, [persist]);
 
   return { inventory, hydrated, setStock, decrementStock, reset };
 }

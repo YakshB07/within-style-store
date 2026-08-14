@@ -1,5 +1,10 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { createServerFn, useServerFn } from "@tanstack/react-start";
+import { getRequestIP, useSession } from "@tanstack/react-start/server";
+import { useEffect, useState } from "react";
+import { z } from "zod";
 import { SIZES, stockLabel, useInventory } from "@/lib/inventory";
+import { isRateLimited, sanitizeText } from "@/lib/security";
 
 export const Route = createFileRoute("/admin")({
   component: AdminInventory,
@@ -21,8 +26,168 @@ const PRODUCTS = [
   { id: "agni-pullover", name: "Agni Pullover", type: "Pullover" },
 ];
 
+const ADMIN_SESSION_CONFIG = {
+  password: process.env.SESSION_SECRET?.trim() || "tdw-local-dev-secret-change-me",
+  name: "tdw-admin-session",
+  maxAge: 60 * 60 * 8,
+  cookie: {
+    httpOnly: true,
+    sameSite: "lax" as const,
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+  },
+};
+
+const adminSessionCheck = createServerFn({ method: "GET" }).handler(async () => {
+  const session = await useSession<{ isAdmin?: boolean }>(ADMIN_SESSION_CONFIG);
+  return { authenticated: session.data.isAdmin === true };
+});
+
+const adminLogin = createServerFn({ method: "POST" })
+  .validator(
+    z.object({
+      username: z.string().min(1).max(64),
+      password: z.string().min(1).max(128),
+    }),
+  )
+  .handler(async ({ data }) => {
+    const username = sanitizeText(data.username, 64).toLowerCase();
+    const password = sanitizeText(data.password, 128);
+    const ip = getRequestIP({ xForwardedFor: true }) ?? "unknown";
+
+    if (isRateLimited(`admin-login:${ip}`, 5, 15 * 60 * 1000)) {
+      return { success: false, reason: "rate-limited" };
+    }
+
+    const configuredUsername = process.env.ADMIN_USERNAME?.trim() || "admin";
+    const configuredPassword = process.env.ADMIN_PASSWORD?.trim() || "divinewithin";
+
+    if (username !== configuredUsername.toLowerCase() || password !== configuredPassword) {
+      return { success: false, reason: "invalid-credentials" };
+    }
+
+    const session = await useSession<{ isAdmin?: boolean }>(ADMIN_SESSION_CONFIG);
+    await session.update({ isAdmin: true });
+    return { success: true };
+  });
+
+const adminLogout = createServerFn({ method: "POST" }).handler(async () => {
+  const session = await useSession<{ isAdmin?: boolean }>(ADMIN_SESSION_CONFIG);
+  await session.clear();
+  return { success: true };
+});
+
 function AdminInventory() {
   const { inventory, hydrated, setStock, reset } = useInventory();
+  const checkSession = useServerFn(adminSessionCheck);
+  const login = useServerFn(adminLogin);
+  const logout = useServerFn(adminLogout);
+  const [credentials, setCredentials] = useState({ username: "", password: "" });
+  const [error, setError] = useState("");
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+
+  useEffect(() => {
+    const verifySession = async () => {
+      const result = await checkSession();
+      setIsAuthenticated(Boolean(result.authenticated));
+    };
+
+    void verifySession();
+  }, [checkSession]);
+
+  const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    const result = await login({
+      data: {
+        username: sanitizeText(credentials.username, 64),
+        password: sanitizeText(credentials.password, 128),
+      },
+    });
+
+    if (result?.success) {
+      setIsAuthenticated(true);
+      setError("");
+      return;
+    }
+
+    if (result?.reason === "rate-limited") {
+      setError("Too many attempts. Please wait 15 minutes before trying again.");
+      return;
+    }
+
+    setError("Incorrect username or password.");
+  };
+
+  const handleLogout = async () => {
+    await logout();
+    setIsAuthenticated(false);
+    setCredentials({ username: "", password: "" });
+    setError("");
+  };
+
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-brand-black text-brand-white font-sans flex items-center justify-center px-6 py-16">
+        <div className="w-full max-w-md border border-white/10 bg-brand-grey p-8">
+          <p className="text-brand-red text-xs font-bold uppercase tracking-widest mb-4">Admin access</p>
+          <h1 className="text-4xl font-display font-extrabold uppercase tracking-tighter mb-6">Login</h1>
+          <p className="text-sm text-muted-foreground mb-6">
+            Enter your admin username and password to manage inventory.
+          </p>
+
+          <form onSubmit={handleLogin} className="space-y-5">
+            <div>
+              <label htmlFor="username" className="block text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">
+                Username
+              </label>
+              <input
+                id="username"
+                type="text"
+                value={credentials.username}
+                onChange={(event) => setCredentials((prev) => ({ ...prev, username: event.target.value }))}
+                className="w-full bg-brand-black border border-white/10 px-4 py-3 text-brand-white outline-none focus:border-brand-red"
+                placeholder="admin"
+              />
+            </div>
+
+            <div>
+              <label htmlFor="password" className="block text-xs font-bold uppercase tracking-widest text-muted-foreground mb-2">
+                Password
+              </label>
+              <input
+                id="password"
+                type="password"
+                value={credentials.password}
+                onChange={(event) => setCredentials((prev) => ({ ...prev, password: event.target.value }))}
+                className="w-full bg-brand-black border border-white/10 px-4 py-3 text-brand-white outline-none focus:border-brand-red"
+                placeholder="••••••••"
+              />
+            </div>
+
+            {error && <p className="text-sm text-brand-red">{error}</p>}
+
+            <div className="rounded border border-brand-red/40 bg-brand-red/10 px-3 py-2 text-xs uppercase tracking-widest text-brand-red">
+              Use your configured admin credentials.
+            </div>
+
+            <button
+              type="submit"
+              className="w-full bg-brand-red px-5 py-3 text-xs font-bold uppercase tracking-widest text-brand-white hover:bg-brand-white hover:text-brand-black transition-colors"
+            >
+              Sign in
+            </button>
+          </form>
+
+          <div className="mt-6 text-center">
+            <Link to="/" className="text-sm text-muted-foreground hover:text-brand-white transition-colors">
+              Back to store
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-brand-black text-brand-white font-sans px-6 md:px-12 py-16">
@@ -39,6 +204,12 @@ function AdminInventory() {
             className="px-6 py-3 border border-white/20 text-xs font-bold uppercase tracking-widest hover:border-brand-red hover:text-brand-red transition-colors"
           >
             Reset stock
+          </button>
+          <button
+            onClick={handleLogout}
+            className="px-6 py-3 border border-white/20 text-xs font-bold uppercase tracking-widest hover:border-brand-red hover:text-brand-red transition-colors"
+          >
+            Log out
           </button>
           <Link
             to="/"
