@@ -155,36 +155,45 @@ const createStripePaymentIntent = createServerFn({ method: "POST" })
     }),
   )
   .handler(async ({ data }) => {
-    const stripeSecretKey = process.env.STRIPE_SECRET_KEY?.trim();
-    const publishableKey = process.env.VITE_STRIPE_PUBLISHABLE_KEY?.trim();
+    try {
+      const stripeSecretKey = process.env.STRIPE_SECRET_KEY?.trim();
+      const publishableKey = process.env.VITE_STRIPE_PUBLISHABLE_KEY?.trim();
 
-    if (!stripeSecretKey || !publishableKey) {
-      return { success: false, reason: "missing-stripe-config" };
+      if (!stripeSecretKey || !publishableKey) {
+        return { success: false, reason: "missing-stripe-config" };
+      }
+
+      const Stripe = (await import("stripe")).default;
+      const stripe = new Stripe(stripeSecretKey, {
+        apiVersion: "2025-02-24.acacia",
+      });
+
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: Math.round(data.amount * 100),
+        currency: data.currency.toLowerCase(),
+        description: `The Divine Within order ${data.orderId}`,
+        metadata: {
+          orderId: data.orderId,
+        },
+        receipt_email: data.email,
+        automatic_payment_methods: {
+          enabled: true,
+        },
+      });
+
+      return {
+        success: true,
+        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id,
+      };
+    } catch (error) {
+      console.error("createStripePaymentIntent server error:", error);
+      return {
+        success: false,
+        reason: "stripe-create-failed",
+        message: error instanceof Error ? error.message : "Unknown Stripe error",
+      };
     }
-
-    const Stripe = (await import("stripe")).default;
-    const stripe = new Stripe(stripeSecretKey, {
-      apiVersion: "2025-02-24.acacia",
-    });
-
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: Math.round(data.amount * 100),
-      currency: data.currency.toLowerCase(),
-      description: `The Divine Within order ${data.orderId}`,
-      metadata: {
-        orderId: data.orderId,
-      },
-      receipt_email: data.email,
-      automatic_payment_methods: {
-        enabled: true,
-      },
-    });
-
-    return {
-      success: true,
-      clientSecret: paymentIntent.client_secret,
-      paymentIntentId: paymentIntent.id,
-    };
   });
 
 const sendOrderEmail = createServerFn({ method: "POST" })
@@ -628,7 +637,8 @@ function Index() {
     }
   };
 
-  const handlePreparePayment = async (event: React.FormEvent<HTMLFormElement>) => {
+  const handlePreparePayment = async (event: React.FormEvent<HTMLFormElement> | React.MouseEvent<HTMLButtonElement>) => {
+    console.log("handlePreparePayment invoked", { eventType: event.type, cartLength: cart.length, checkout });
     event.preventDefault();
     setSubmitAttempted(true);
 
@@ -680,8 +690,15 @@ function Index() {
         },
       });
 
+      console.log("createPaymentIntent resolved:", paymentResult);
+
       if (paymentResult?.success === false && paymentResult?.reason === "missing-stripe-config") {
         setPaymentError("Stripe is not configured correctly. Please contact support.");
+        return;
+      }
+
+      if (paymentResult?.success === false && paymentResult?.reason === "stripe-create-failed") {
+        setPaymentError(paymentResult.message ?? "Stripe could not create a payment session. Please try again.");
         return;
       }
 
@@ -699,7 +716,7 @@ function Index() {
       };
       setClientSecret(paymentResult.clientSecret);
     } catch (error) {
-      console.error("Payment intent creation failed:", error);
+      console.error("handlePreparePayment catch:", error);
       setClientSecret(null);
       setOrderId(null);
       paymentShippingSnapshotRef.current = null;
@@ -1273,7 +1290,8 @@ function Index() {
 
                     {!clientSecret && (
                       <button
-                        type="submit"
+                        type="button"
+                        onClick={handlePreparePayment}
                         disabled={isPreparingPayment}
                         className="w-full bg-brand-red px-5 py-4 text-xs font-bold uppercase tracking-widest text-brand-white hover:bg-brand-white hover:text-brand-black transition-colors disabled:cursor-not-allowed disabled:opacity-60"
                       >
