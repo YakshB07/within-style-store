@@ -176,7 +176,6 @@ const createStripePaymentIntent = createServerFn({ method: "POST" })
           orderId: data.orderId,
         },
         receipt_email: data.email,
-        payment_method_types: ["card", "apple_pay"],
         automatic_payment_methods: {
           enabled: true,
         },
@@ -366,7 +365,7 @@ function CheckoutPaymentForm({ clientSecret, onSubmitOrder, paymentError, setPay
         <PaymentElement
           options={{
             layout: "tabs",
-            paymentMethodOrder: ["card", "apple_pay"],
+            paymentMethodOrder: ["card"],
             wallets: {
               applePay: "auto",
             },
