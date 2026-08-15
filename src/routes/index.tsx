@@ -1,6 +1,8 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { createServerFn, useServerFn } from "@tanstack/react-start";
-import { useEffect, useState } from "react";
+import { Elements, PaymentElement, useElements, useStripe } from "@stripe/react-stripe-js";
+import { loadStripe } from "@stripe/stripe-js";
+import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import nodemailer from "nodemailer";
 import { SIZES, stockLabel, useInventory, type Size } from "@/lib/inventory";
@@ -295,6 +297,83 @@ const sendOrderEmail = createServerFn({ method: "POST" })
     return { success: true };
   });
 
+const stripePromise = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY
+  ? loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY)
+  : null;
+
+type CheckoutPaymentFormProps = {
+  clientSecret: string;
+  onSubmitOrder: () => Promise<void>;
+  paymentError: string;
+  setPaymentError: (message: string) => void;
+};
+
+function CheckoutPaymentForm({ clientSecret, onSubmitOrder, paymentError, setPaymentError }: CheckoutPaymentFormProps) {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!stripe || !elements) {
+      setPaymentError("Stripe has not loaded yet. Please wait a moment and try again.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    setPaymentError("");
+
+    try {
+      const result = await stripe.confirmPayment({
+        elements,
+        clientSecret,
+        confirmParams: {
+          return_url: window.location.origin,
+        },
+        redirect: "if_required",
+      });
+
+      if (result.error) {
+        setPaymentError(result.error.message ?? "Your payment could not be processed. Please try again.");
+        return;
+      }
+
+      if (result.paymentIntent?.status !== "succeeded") {
+        setPaymentError("Payment was not completed. Please try again.");
+        return;
+      }
+
+      await onSubmitOrder();
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <div className="rounded-xl border border-white/10 bg-brand-grey/40 p-4">
+        <PaymentElement
+          options={{
+            layout: "tabs",
+            paymentMethodOrder: ["card", "apple_pay"],
+          }}
+        />
+      </div>
+
+      {paymentError && <p className="text-xs text-brand-red">{paymentError}</p>}
+
+      <button
+        type="submit"
+        disabled={!stripe || !elements || isSubmitting}
+        className="w-full bg-brand-red px-5 py-4 text-xs font-bold uppercase tracking-widest text-brand-white hover:bg-brand-white hover:text-brand-black transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        {isSubmitting ? "Processing..." : "Place Order"}
+      </button>
+    </form>
+  );
+}
+
 function Index() {
   const sendEmail = useServerFn(sendOrderEmail);
   const createPaymentIntent = useServerFn(createStripePaymentIntent);
@@ -338,12 +417,16 @@ function Index() {
     province: "",
     postalCode: "",
     shippingPhone: "",
-    payment: "Visa",
   });
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const [shippingCost, setShippingCost] = useState(0);
   const [shippingCostError, setShippingCostError] = useState("");
   const [isCalculatingShippingCost, setIsCalculatingShippingCost] = useState(false);
+  const [clientSecret, setClientSecret] = useState<string | null>(null);
+  const [orderId, setOrderId] = useState<string | null>(null);
+  const [paymentError, setPaymentError] = useState("");
+  const [isPreparingPayment, setIsPreparingPayment] = useState(false);
+  const paymentShippingSnapshotRef = useRef<{ postalCode: string; province: string } | null>(null);
 
   const subtotal = cart.reduce((sum, item) => sum + item.price, 0);
   const tax = subtotal * 0.13;
@@ -434,7 +517,118 @@ function Index() {
         : ""
     : "";
 
-  const handlePlaceOrder = async (event: React.FormEvent<HTMLFormElement>) => {
+  useEffect(() => {
+    if (!clientSecret || !paymentShippingSnapshotRef.current) return;
+
+    const snapshot = paymentShippingSnapshotRef.current;
+    const currentPostal = normalizePostalCode(checkout.postalCode);
+    const provinceChanged = checkout.province.trim() !== snapshot.province;
+    const postalChanged = currentPostal !== snapshot.postalCode;
+
+    if (postalChanged || provinceChanged) {
+      setClientSecret(null);
+      setOrderId(null);
+      paymentShippingSnapshotRef.current = null;
+      setPaymentError("");
+    }
+  }, [checkout.postalCode, checkout.province, clientSecret]);
+
+  const handlePlaceOrder = async () => {
+    if (!cart.length) return;
+    if (!orderId) {
+      setPaymentError("A valid order ID was not created. Please try again.");
+      return;
+    }
+
+    const normalizedPostalCode = normalizePostalCode(checkout.postalCode);
+    const orderRecord = {
+      id: orderId,
+      customer: {
+        firstName: checkout.firstName.trim(),
+        lastName: checkout.lastName.trim(),
+        email: checkout.email.trim(),
+        phone: checkout.shippingPhone.trim(),
+        payment: "Card",
+      },
+      shippingAddress: {
+        fullName: checkout.shippingFullName.trim(),
+        addressLine1: checkout.addressLine1.trim(),
+        addressLine2: checkout.addressLine2.trim(),
+        city: checkout.city.trim(),
+        province: checkout.province,
+        postalCode: normalizedPostalCode,
+        phone: checkout.shippingPhone.trim(),
+      },
+      items: cart.map((item) => ({ name: item.name, size: item.size, price: item.price })),
+      subtotal,
+      tax,
+      shippingCost,
+      total,
+      placedAt: new Date().toISOString(),
+    };
+
+    setIsProcessingOrder(true);
+
+    try {
+      try {
+        const savedOrdersRaw = localStorage.getItem(ORDERS_STORAGE_KEY);
+        const savedOrders = savedOrdersRaw ? JSON.parse(savedOrdersRaw) : [];
+        const nextOrders = Array.isArray(savedOrders) ? [orderRecord, ...savedOrders] : [orderRecord];
+        localStorage.setItem(ORDERS_STORAGE_KEY, JSON.stringify(nextOrders.slice(0, 50)));
+      } catch {
+        // ignore local storage errors and continue with the backend email attempt
+      }
+
+      const groupedByProduct = cart.reduce<Record<string, Record<string, number>>>((acc, item) => {
+        const productId = item.id;
+        const size = item.size;
+        acc[productId] ??= {};
+        acc[productId][size] = (acc[productId][size] ?? 0) + 1;
+        return acc;
+      }, {});
+
+      Object.entries(groupedByProduct).forEach(([productId, sizes]) => {
+        Object.entries(sizes).forEach(([size, qty]) => {
+          const currentQty = inventory[productId]?.[size as Size] ?? 0;
+          setStock(productId, size as Size, Math.max(0, currentQty - qty));
+        });
+      });
+
+      try {
+        const result = await sendEmail({ data: orderRecord });
+        if (result?.success === false && result?.reason === "missing-smtp-config") {
+          console.warn("Order email skipped because SMTP environment variables are not configured.");
+        }
+      } catch (error) {
+        console.error("Order email failed:", error);
+      }
+
+      setRecentOrder(orderRecord);
+      setCart([]);
+      setCheckout({
+        firstName: "",
+        lastName: "",
+        email: "",
+        shippingFullName: "",
+        addressLine1: "",
+        addressLine2: "",
+        city: "",
+        province: "",
+        postalCode: "",
+        shippingPhone: "",
+      });
+      setShippingCost(0);
+      setShippingCostError("");
+      setClientSecret(null);
+      setOrderId(null);
+      paymentShippingSnapshotRef.current = null;
+      setPaymentError("");
+    } finally {
+      setIsProcessingOrder(false);
+    }
+  };
+
+  const handlePreparePayment = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSubmitAttempted(true);
 
@@ -466,103 +660,52 @@ function Index() {
       return;
     }
 
-    setIsProcessingOrder(true);
+    if (!stripeEnabled) {
+      setPaymentError("Add your Stripe keys in .env to enable live checkout.");
+      return;
+    }
 
-    const normalizedPostalCode = normalizePostalCode(checkout.postalCode);
-    const orderRecord = {
-      id: `tdw-${Date.now()}`,
-      customer: {
-        firstName: checkout.firstName.trim(),
-        lastName: checkout.lastName.trim(),
-        email: checkout.email.trim(),
-        phone: checkout.shippingPhone.trim(),
-        payment: checkout.payment,
-      },
-      shippingAddress: {
-        fullName: checkout.shippingFullName.trim(),
-        addressLine1: checkout.addressLine1.trim(),
-        addressLine2: checkout.addressLine2.trim(),
-        city: checkout.city.trim(),
-        province: checkout.province,
-        postalCode: normalizedPostalCode,
-        phone: checkout.shippingPhone.trim(),
-      },
-      items: cart.map((item) => ({ name: item.name, size: item.size, price: item.price })),
-      subtotal,
-      tax,
-      shippingCost,
-      total,
-      placedAt: new Date().toISOString(),
-    };
+    setPaymentError("");
+    const generatedOrderId = `tdw-${Date.now()}`;
+    setOrderId(generatedOrderId);
+    setIsPreparingPayment(true);
 
     try {
-      try {
-        const savedOrdersRaw = localStorage.getItem(ORDERS_STORAGE_KEY);
-        const savedOrders = savedOrdersRaw ? JSON.parse(savedOrdersRaw) : [];
-        const nextOrders = Array.isArray(savedOrders) ? [orderRecord, ...savedOrders] : [orderRecord];
-        localStorage.setItem(ORDERS_STORAGE_KEY, JSON.stringify(nextOrders.slice(0, 50)));
-      } catch {
-        // ignore local storage errors and continue with the backend email attempt
-      }
-
-      const groupedByProduct = cart.reduce<Record<string, Record<string, number>>>((acc, item) => {
-        const productId = item.id;
-        const size = item.size;
-        acc[productId] ??= {};
-        acc[productId][size] = (acc[productId][size] ?? 0) + 1;
-        return acc;
-      }, {});
-
-      if (stripeEnabled) {
-        const paymentResult = await createPaymentIntent({
-          data: {
-            amount: total,
-            currency: "cad",
-            orderId: orderRecord.id,
-            email: checkout.email.trim(),
-          },
-        });
-
-        if (paymentResult?.success === false && paymentResult?.reason === "missing-stripe-config") {
-          console.warn("Stripe payment config is incomplete. Live payment intent creation was skipped.");
-        }
-      }
-
-      Object.entries(groupedByProduct).forEach(([productId, sizes]) => {
-        Object.entries(sizes).forEach(([size, qty]) => {
-          const currentQty = inventory[productId]?.[size as Size] ?? 0;
-          setStock(productId, size as Size, Math.max(0, currentQty - qty));
-        });
+      const paymentResult = await createPaymentIntent({
+        data: {
+          amount: total,
+          currency: "cad",
+          orderId: generatedOrderId,
+          email: checkout.email.trim(),
+        },
       });
 
-      try {
-        const result = await sendEmail({ data: orderRecord });
-        if (result?.success === false && result?.reason === "missing-smtp-config") {
-          console.warn("Order email skipped because SMTP environment variables are not configured.");
-        }
-      } catch (error) {
-        console.error("Order email failed:", error);
+      if (paymentResult?.success === false && paymentResult?.reason === "missing-stripe-config") {
+        setPaymentError("Stripe is not configured correctly. Please contact support.");
+        return;
       }
 
-      setRecentOrder(orderRecord);
-      setCart([]);
-      setCheckout({
-        firstName: "",
-        lastName: "",
-        email: "",
-        shippingFullName: "",
-        addressLine1: "",
-        addressLine2: "",
-        city: "",
-        province: "",
-        postalCode: "",
-        shippingPhone: "",
-        payment: "Visa",
-      });
-      setShippingCost(0);
-      setShippingCostError("");
+      if (!paymentResult?.success || !paymentResult.clientSecret) {
+        setClientSecret(null);
+        setOrderId(null);
+        paymentShippingSnapshotRef.current = null;
+        setPaymentError("We could not start secure checkout. Please try again.");
+        return;
+      }
+
+      paymentShippingSnapshotRef.current = {
+        postalCode: normalizePostalCode(checkout.postalCode),
+        province: checkout.province.trim(),
+      };
+      setClientSecret(paymentResult.clientSecret);
+    } catch (error) {
+      console.error("Payment intent creation failed:", error);
+      setClientSecret(null);
+      setOrderId(null);
+      paymentShippingSnapshotRef.current = null;
+      setPaymentError("We could not start secure checkout. Please try again.");
     } finally {
-      setIsProcessingOrder(false);
+      setIsPreparingPayment(false);
     }
   };
 
@@ -1088,73 +1231,55 @@ function Index() {
 
                     <div>
                       <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">Payment</label>
+
                       {!stripeEnabled && (
                         <p className="mb-3 text-[10px] uppercase tracking-widest text-brand-red">
                           Add your Stripe keys in .env to enable live checkout.
                         </p>
                       )}
-                      {stripeEnabled && (
-                        <p className="mb-3 text-[10px] uppercase tracking-widest text-brand-white/70">
-                          Live Stripe checkout is ready when your keys are added.
-                        </p>
-                      )}
-                      <div className="grid grid-cols-2 gap-3">
-                        {[
-                          {
-                            value: "Visa",
-                            label: "Visa",
-                            accent: "from-[#1A1F71] via-[#0E2A7C] to-[#050B2D]",
-                            badge: "bg-white/10 text-white",
-                            chip: "bg-white/20",
-                            icon: "VISA",
-                          },
-                          {
-                            value: "Apple Pay",
-                            label: "Apple Pay",
-                            accent: "from-[#1A1A1A] via-[#3A3A3A] to-[#0F0F10]",
-                            badge: "bg-white/10 text-white",
-                            chip: "bg-[#9DB9FF]",
-                            icon: "",
-                          },
-                        ].map((method) => {
-                          const selected = checkout.payment === method.value;
 
-                          return (
-                            <button
-                              key={method.value}
-                              type="button"
-                              onClick={() => handleCheckoutChange("payment", method.value)}
-                              className={`relative overflow-hidden rounded-2xl border p-4 text-left transition-all duration-200 ${
-                                selected ? "border-brand-red bg-brand-red/10 shadow-[0_0_0_1px_rgba(255,255,255,0.08)]" : "border-white/10 bg-brand-grey hover:border-white/20"
-                              }`}
-                            >
-                              <div className={`absolute inset-0 bg-gradient-to-br ${method.accent} opacity-90`} />
-                              <div className="relative z-10 flex items-start justify-between gap-3">
-                                <div>
-                                  <div className="mb-3 flex items-center gap-2">
-                                    <span className={`inline-flex h-8 w-8 items-center justify-center rounded-full text-[12px] font-black ${method.badge}`}>
-                                      {method.icon}
-                                    </span>
-                                    <span className="text-[10px] font-bold uppercase tracking-[0.22em] text-white/80">Pay</span>
-                                  </div>
-                                  <div className="text-lg font-black tracking-tight text-white">{method.label}</div>
-                                </div>
-                                <span className={`mt-1 inline-flex h-7 w-7 items-center justify-center rounded-full text-[10px] font-bold ${method.chip} ${selected ? "text-brand-black" : "text-white"}`}>
-                                  {selected ? "✓" : ""}
-                                </span>
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </div>
+                      {!stripeEnabled ? null : clientSecret ? (
+                        <Elements
+                          stripe={stripePromise}
+                          options={{
+                            clientSecret,
+                            appearance: {
+                              theme: "night",
+                              variables: {
+                                colorPrimary: "#f04d3f",
+                                colorBackground: "#111111",
+                                colorText: "#f5f5f5",
+                                colorTextSecondary: "#c9c9c9",
+                                borderRadius: "10px",
+                              },
+                            },
+                          }}
+                        >
+                          <CheckoutPaymentForm
+                            clientSecret={clientSecret}
+                            onSubmitOrder={handlePlaceOrder}
+                            paymentError={paymentError}
+                            setPaymentError={setPaymentError}
+                          />
+                        </Elements>
+                      ) : (
+                        <div className="rounded-xl border border-white/10 bg-brand-grey/40 p-4 text-xs uppercase tracking-widest text-muted-foreground">
+                          {isPreparingPayment ? "Preparing secure payment..." : "Complete the shipping details, then continue to payment."}
+                        </div>
+                      )}
+
+                      {paymentError && !clientSecret && <p className="mt-3 text-xs text-brand-red">{paymentError}</p>}
                     </div>
 
-                    <button
-                      type="submit"
-                      className="w-full bg-brand-red px-5 py-4 text-xs font-bold uppercase tracking-widest text-brand-white hover:bg-brand-white hover:text-brand-black transition-colors"
-                    >
-                      Place Order
-                    </button>
+                    {!clientSecret && (
+                      <button
+                        type="submit"
+                        disabled={isPreparingPayment}
+                        className="w-full bg-brand-red px-5 py-4 text-xs font-bold uppercase tracking-widest text-brand-white hover:bg-brand-white hover:text-brand-black transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {isPreparingPayment ? "Preparing Payment..." : "Continue to Payment"}
+                      </button>
+                    )}
                   </form>
                 </aside>
               </div>
