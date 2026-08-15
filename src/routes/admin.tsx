@@ -27,7 +27,8 @@ const PRODUCTS = [
 ];
 
 const ADMIN_SESSION_CONFIG = {
-  password: process.env.SESSION_SECRET?.trim() || "tdw-local-dev-secret-change-me",
+  // useSession requires a 32+ character encryption password
+  password: process.env.SESSION_SECRET?.trim() || "tdw-local-dev-secret-change-me-please",
   name: "tdw-admin-session",
   maxAge: 60 * 60 * 8,
   cookie: {
