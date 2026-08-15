@@ -176,6 +176,7 @@ const createStripePaymentIntent = createServerFn({ method: "POST" })
           orderId: data.orderId,
         },
         receipt_email: data.email,
+        payment_method_types: ["card", "apple_pay"],
         automatic_payment_methods: {
           enabled: true,
         },
@@ -366,6 +367,9 @@ function CheckoutPaymentForm({ clientSecret, onSubmitOrder, paymentError, setPay
           options={{
             layout: "tabs",
             paymentMethodOrder: ["card", "apple_pay"],
+            wallets: {
+              applePay: "auto",
+            },
           }}
         />
       </div>
@@ -801,28 +805,28 @@ function Index() {
       </nav>
 
       {/* Hero Section */}
-      <section className="relative px-6 md:px-12 pt-32 md:pt-40 pb-16 md:pb-24 grid md:grid-cols-12 gap-8 items-center">
+      <section className="relative px-4 sm:px-6 md:px-12 pt-24 sm:pt-28 md:pt-40 pb-12 sm:pb-16 md:pb-24 grid gap-6 md:grid-cols-12 md:gap-8 md:items-center">
         <div className="md:col-span-7 z-10">
-          <h1 className="text-6xl md:text-8xl lg:text-9xl font-display font-extrabold uppercase leading-[0.85] tracking-tighter mb-8">
+          <h1 className="text-[3.2rem] leading-[0.82] sm:text-[4.25rem] md:text-7xl lg:text-[7rem] xl:text-[8rem] font-display font-extrabold uppercase tracking-tighter mb-4 sm:mb-6 md:mb-8 max-w-[12ch]">
             Awaken{" "}
             <span className="text-brand-red italic">Your</span>
             <br />
             Dharma.
           </h1>
-          <p className="max-w-md text-lg md:text-xl leading-relaxed mb-10 text-muted-foreground">
+          <p className="max-w-md text-base sm:text-lg md:text-xl leading-relaxed mb-6 sm:mb-8 md:mb-10 text-muted-foreground">
             Contemporary unisex silhouettes meeting ancient Vedic consciousness. One soul, two forms.
           </p>
-          <div className="flex flex-wrap gap-4">
+          <div className="flex flex-wrap gap-3 sm:gap-4">
             <button
               onClick={() => scrollToSection("collection")}
-              className="px-8 py-4 bg-brand-red text-brand-white font-display font-extrabold uppercase tracking-wider hover:bg-brand-white hover:text-brand-black transition-all duration-300"
+              className="px-5 py-3 sm:px-8 sm:py-4 bg-brand-red text-brand-white font-display font-extrabold uppercase tracking-wider hover:bg-brand-white hover:text-brand-black transition-all duration-300 text-sm sm:text-base"
             >
               Shop Collection
             </button>
           </div>
         </div>
-        <div className="md:col-span-5 relative">
-          <div className="w-full aspect-[4/5] bg-brand-grey overflow-hidden ring-1 ring-white/5">
+        <div className="md:col-span-5 relative order-first md:order-none">
+          <div className="w-full aspect-[4/5] max-w-[30rem] md:max-w-none mx-auto md:mx-0 bg-brand-grey overflow-hidden ring-1 ring-white/5">
             <img
               src={heroHoodie}
               alt="Stoic young man wearing the black Dharma hoodie with a red Om emblem"
@@ -833,8 +837,8 @@ function Index() {
               fetchPriority="high"
             />
           </div>
-          <div className="absolute -bottom-6 -left-6 md:-left-12 bg-brand-red px-6 py-4 hidden md:block">
-            <span className="font-display font-extrabold uppercase text-2xl text-brand-white">New Drop</span>
+          <div className="absolute -bottom-6 -left-6 md:-left-12 bg-brand-red px-5 py-3 md:px-6 md:py-4 hidden md:block">
+            <span className="font-display font-extrabold uppercase text-xl md:text-2xl text-brand-white">New Drop</span>
           </div>
         </div>
       </section>
