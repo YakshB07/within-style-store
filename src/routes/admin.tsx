@@ -4,7 +4,7 @@ import { getRequestIP, useSession } from "@tanstack/react-start/server";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { SIZES, stockLabel, useInventory } from "@/lib/inventory";
-import { flushQueuedRestockUpdates, getRestockDigestStatus, syncQueuedRestockUpdate } from "@/lib/stock-updates";
+import { clearQueuedRestockUpdates, flushQueuedRestockUpdates, getRestockDigestStatus, syncQueuedRestockUpdate } from "@/lib/stock-updates";
 import { isRateLimited, sanitizeText } from "@/lib/security";
 
 export const Route = createFileRoute("/admin")({
@@ -100,6 +100,10 @@ const getRestockStatus = createServerFn({ method: "GET" }).handler(async () => {
   return getRestockDigestStatus();
 });
 
+const clearRestockQueue = createServerFn({ method: "POST" }).handler(async () => {
+  return clearQueuedRestockUpdates();
+});
+
 function AdminInventory() {
   const { inventory, hydrated, setStock, reset } = useInventory();
   const checkSession = useServerFn(adminSessionCheck);
@@ -108,6 +112,7 @@ function AdminInventory() {
   const notifyRestock = useServerFn(sendRestockNotification);
   const confirmRestock = useServerFn(confirmRestockNotification);
   const fetchRestockStatus = useServerFn(getRestockStatus);
+  const clearQueue = useServerFn(clearRestockQueue);
   const [credentials, setCredentials] = useState({ username: "", password: "" });
   const [error, setError] = useState("");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -244,6 +249,18 @@ function AdminInventory() {
     }
   };
 
+  const handleResetStock = async () => {
+    try {
+      await clearQueue();
+      reset();
+      await refreshRestockStatus();
+      setRestockMessage("Stock and queued updates were reset.");
+    } catch (resetError) {
+      console.error("Reset stock failed:", resetError);
+      setRestockMessage("Could not fully reset queue and stock. Please try again.");
+    }
+  };
+
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-brand-black text-brand-white font-sans flex items-center justify-center px-6 py-16">
@@ -318,7 +335,7 @@ function AdminInventory() {
         </div>
         <div className="flex gap-4">
           <button
-            onClick={reset}
+            onClick={() => void handleResetStock()}
             className="px-6 py-3 border border-white/20 text-xs font-bold uppercase tracking-widest hover:border-brand-red hover:text-brand-red transition-colors"
           >
             Reset stock

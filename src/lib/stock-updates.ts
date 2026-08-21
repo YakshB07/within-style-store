@@ -308,6 +308,15 @@ export const getRestockDigestStatus = () => {
   };
 };
 
+export const clearQueuedRestockUpdates = () => {
+  const digestStore = getRestockDigestStore();
+  const clearedCount = digestStore.pending.length;
+  digestStore.pending = [];
+  digestStore.lastReason = "queue-cleared";
+  digestStore.lastError = null;
+  return { success: true as const, clearedCount };
+};
+
 export const flushQueuedRestockUpdates = async () => {
   const digestStore = getRestockDigestStore();
 
