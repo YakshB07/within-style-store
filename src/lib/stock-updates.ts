@@ -18,6 +18,12 @@ type RestockSyncPayload = {
   newQty: number;
 };
 
+type RestockSnapshotPayload = {
+  productName: string;
+  size: string;
+  qty: number;
+};
+
 type RestockDigestStore = {
   pending: RestockUpdatePayload[];
   isSending: boolean;
@@ -232,7 +238,8 @@ export const queueRestockUpdateEmail = async (payload: RestockUpdatePayload) => 
     const existing = digestStore.pending[existingIndex];
     digestStore.pending[existingIndex] = {
       ...existing,
-      previousQty: Math.min(existing.previousQty, payload.previousQty),
+      // Keep the first baseline quantity from when this item entered the queue.
+      previousQty: existing.previousQty,
       newQty: payload.newQty,
     };
   } else {
@@ -260,13 +267,17 @@ export const syncQueuedRestockUpdate = async (payload: RestockSyncPayload) => {
   );
 
   if (existingIndex >= 0) {
+    const existing = digestStore.pending[existingIndex];
+
     if (payload.newQty <= 0) {
       digestStore.pending.splice(existingIndex, 1);
+    } else if (payload.newQty <= existing.previousQty) {
+      // If stock returns to or below baseline, this is no longer a restock.
+      digestStore.pending.splice(existingIndex, 1);
     } else {
-      const existing = digestStore.pending[existingIndex];
       digestStore.pending[existingIndex] = {
         ...existing,
-        previousQty: Math.min(existing.previousQty, payload.previousQty),
+        previousQty: existing.previousQty,
         newQty: payload.newQty,
       };
     }
@@ -305,6 +316,40 @@ export const getRestockDigestStatus = () => {
     lastSentCount: digestStore.lastSentCount,
     lastReason: digestStore.lastReason,
     lastError: digestStore.lastError,
+  };
+};
+
+export const reconcileQueuedRestockUpdates = (snapshot: RestockSnapshotPayload[]) => {
+  const digestStore = getRestockDigestStore();
+  const snapshotByKey = new Map<string, number>();
+
+  for (const item of snapshot) {
+    const key = `${item.productName}::${item.size}`;
+    snapshotByKey.set(key, Math.max(0, Math.floor(item.qty) || 0));
+  }
+
+  const reconciled = digestStore.pending
+    .map((update) => {
+      const key = `${update.productName}::${update.size}`;
+      if (!snapshotByKey.has(key)) {
+        return update;
+      }
+
+      const syncedQty = snapshotByKey.get(key) ?? update.newQty;
+      return {
+        ...update,
+        newQty: syncedQty,
+      };
+    })
+    .filter((update) => update.newQty > update.previousQty);
+
+  digestStore.pending = reconciled;
+  digestStore.lastReason = "queue-reconciled";
+  digestStore.lastError = null;
+
+  return {
+    success: true as const,
+    queuedCount: digestStore.pending.length,
   };
 };
 

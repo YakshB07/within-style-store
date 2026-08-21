@@ -4,7 +4,7 @@ import { getRequestIP, useSession } from "@tanstack/react-start/server";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { SIZES, stockLabel, useInventory } from "@/lib/inventory";
-import { clearQueuedRestockUpdates, flushQueuedRestockUpdates, getRestockDigestStatus, syncQueuedRestockUpdate } from "@/lib/stock-updates";
+import { clearQueuedRestockUpdates, flushQueuedRestockUpdates, getRestockDigestStatus, reconcileQueuedRestockUpdates, syncQueuedRestockUpdate } from "@/lib/stock-updates";
 import { isRateLimited, sanitizeText } from "@/lib/security";
 
 export const Route = createFileRoute("/admin")({
@@ -92,9 +92,22 @@ const sendRestockNotification = createServerFn({ method: "POST" })
     return syncQueuedRestockUpdate(data);
   });
 
-const confirmRestockNotification = createServerFn({ method: "POST" }).handler(async () => {
-  return flushQueuedRestockUpdates();
-});
+const confirmRestockNotification = createServerFn({ method: "POST" })
+  .validator(
+    z.object({
+      snapshot: z.array(
+        z.object({
+          productName: z.string().min(1),
+          size: z.string().min(1),
+          qty: z.number().int().min(0),
+        }),
+      ),
+    }),
+  )
+  .handler(async ({ data }) => {
+    reconcileQueuedRestockUpdates(data.snapshot);
+    return flushQueuedRestockUpdates();
+  });
 
 const getRestockStatus = createServerFn({ method: "GET" }).handler(async () => {
   return getRestockDigestStatus();
@@ -215,7 +228,15 @@ function AdminInventory() {
     setIsConfirmingRestock(true);
 
     try {
-      const result = await confirmRestock();
+      const snapshot = PRODUCTS.flatMap((product) =>
+        SIZES.map((size) => ({
+          productName: product.name,
+          size,
+          qty: inventory[product.id]?.[size] ?? 0,
+        })),
+      );
+
+      const result = await confirmRestock({ data: { snapshot } });
       if (result?.success) {
         if (result.reason === "sent-fallback") {
           setRestockMessage("Combined stock email sent to your store inbox fallback (no subscriber list was available in memory).");
