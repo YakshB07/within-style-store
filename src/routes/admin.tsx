@@ -4,7 +4,7 @@ import { getRequestIP, useSession } from "@tanstack/react-start/server";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { SIZES, stockLabel, useInventory } from "@/lib/inventory";
-import { flushQueuedRestockUpdates, getRestockDigestStatus, queueRestockUpdateEmail } from "@/lib/stock-updates";
+import { flushQueuedRestockUpdates, getRestockDigestStatus, syncQueuedRestockUpdate } from "@/lib/stock-updates";
 import { isRateLimited, sanitizeText } from "@/lib/security";
 
 export const Route = createFileRoute("/admin")({
@@ -89,7 +89,7 @@ const sendRestockNotification = createServerFn({ method: "POST" })
     }),
   )
   .handler(async ({ data }) => {
-    return queueRestockUpdateEmail(data);
+    return syncQueuedRestockUpdate(data);
   });
 
 const confirmRestockNotification = createServerFn({ method: "POST" }).handler(async () => {
@@ -181,28 +181,28 @@ function AdminInventory() {
 
     setStock(productId, size as never, nextQty);
 
-    if (previousQty <= 0 && nextQty > 0) {
-      try {
-        const result = await notifyRestock({
-          data: {
-            productName,
-            size,
-            previousQty,
-            newQty: nextQty,
-          },
-        });
+    try {
+      const result = await notifyRestock({
+        data: {
+          productName,
+          size,
+          previousQty,
+          newQty: nextQty,
+        },
+      });
 
-        if (result?.success && typeof result.queuedCount === "number") {
-          setQueuedRestockCount(result.queuedCount);
-          setRestockMessage(
-            `Restock queued. ${result.queuedCount} item${result.queuedCount === 1 ? "" : "s"} waiting for confirmation email.`,
-          );
-          await refreshRestockStatus();
-        }
-      } catch (notifyError) {
-        console.error("Restock notification failed:", notifyError);
-        setRestockMessage("Stock updated, but we could not send restock emails.");
+      if (result?.success && typeof result.queuedCount === "number") {
+        setQueuedRestockCount(result.queuedCount);
+        setRestockMessage(
+          result.queuedCount > 0
+            ? `Restock queued. ${result.queuedCount} item${result.queuedCount === 1 ? "" : "s"} waiting for confirmation email.`
+            : "No restock changes are currently queued.",
+        );
+        await refreshRestockStatus();
       }
+    } catch (notifyError) {
+      console.error("Restock notification failed:", notifyError);
+      setRestockMessage("Stock updated, but we could not sync queued restock changes.");
     }
   };
 

@@ -11,6 +11,13 @@ type RestockUpdatePayload = {
   newQty: number;
 };
 
+type RestockSyncPayload = {
+  productName: string;
+  size: string;
+  previousQty: number;
+  newQty: number;
+};
+
 type RestockDigestStore = {
   pending: RestockUpdatePayload[];
   isSending: boolean;
@@ -164,7 +171,7 @@ const sendRestockDigestEmail = async (updates: RestockUpdatePayload[]): Promise<
   const updateLines = updates
     .map(
       (update) =>
-        `- ${update.productName} | Size ${update.size} | ${update.previousQty} -> ${update.newQty}`,
+        `- ${update.productName}, size ${update.size}: ${update.previousQty} to ${update.newQty}`,
     )
     .join("\n");
 
@@ -181,15 +188,21 @@ const sendRestockDigestEmail = async (updates: RestockUpdatePayload[]): Promise<
       from: transporterState.fromAddress,
       to: toAddress,
       ...(hasSubscribers ? { bcc: subscribers } : {}),
-      subject: "The Divine Within restock update",
+      subject: "The Divine Within stock update",
       text: [
-        "New stock is available.",
+        "Hi there,",
         "",
-        "This update includes all recent restocks:",
+        "Great news - we have updated stock on The Divine Within store.",
+        "",
+        "Here are the confirmed changes:",
         updateLines,
-        hasSubscribers ? "" : "(Sent to the store inbox because no subscribers were stored in memory.)",
         "",
-        "Visit the store to order while it is available.",
+        "If one of these was on your list, now is a good time to order before it sells out again.",
+        "",
+        "With gratitude,",
+        "The Divine Within",
+        hasSubscribers ? "" : "",
+        hasSubscribers ? "" : "Note: This copy was sent to the store inbox fallback because no subscriber list was available in memory.",
       ].join("\n"),
     });
 
@@ -232,6 +245,48 @@ export const queueRestockUpdateEmail = async (payload: RestockUpdatePayload) => 
 
   digestStore.lastReason = "queued";
   digestStore.lastError = null;
+
+  return {
+    success: true as const,
+    queuedCount: digestStore.pending.length,
+  };
+};
+
+export const syncQueuedRestockUpdate = async (payload: RestockSyncPayload) => {
+  const digestStore = getRestockDigestStore();
+
+  const existingIndex = digestStore.pending.findIndex(
+    (update) => update.productName === payload.productName && update.size === payload.size,
+  );
+
+  if (existingIndex >= 0) {
+    if (payload.newQty <= 0) {
+      digestStore.pending.splice(existingIndex, 1);
+    } else {
+      const existing = digestStore.pending[existingIndex];
+      digestStore.pending[existingIndex] = {
+        ...existing,
+        previousQty: Math.min(existing.previousQty, payload.previousQty),
+        newQty: payload.newQty,
+      };
+    }
+
+    digestStore.lastReason = "queued";
+    digestStore.lastError = null;
+    return {
+      success: true as const,
+      queuedCount: digestStore.pending.length,
+    };
+  }
+
+  if (payload.previousQty <= 0 && payload.newQty > 0) {
+    return queueRestockUpdateEmail({
+      productName: payload.productName,
+      size: payload.size,
+      previousQty: payload.previousQty,
+      newQty: payload.newQty,
+    });
+  }
 
   return {
     success: true as const,
