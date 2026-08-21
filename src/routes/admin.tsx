@@ -212,7 +212,10 @@ function AdminInventory() {
     try {
       const result = await confirmRestock();
       if (result?.success) {
-        if (typeof result.sentCount === "number" && result.sentCount > 0) {
+        if (result.reason === "sent-fallback") {
+          setRestockMessage("Combined stock email sent to your store inbox fallback (no subscriber list was available in memory).");
+          setQueuedRestockCount(0);
+        } else if (typeof result.sentCount === "number" && result.sentCount > 0) {
           setRestockMessage(`Combined stock email sent to ${result.sentCount} subscriber${result.sentCount === 1 ? "" : "s"}.`);
           setQueuedRestockCount(0);
         } else if (result.reason === "no-subscribers") {

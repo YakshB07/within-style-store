@@ -21,7 +21,7 @@ type RestockDigestStore = {
   lastError: string | null;
 };
 
-type DispatchSuccessReason = "sent" | "no-updates" | "no-subscribers";
+type DispatchSuccessReason = "sent" | "sent-fallback" | "no-updates" | "no-subscribers";
 type DispatchFailureReason = "missing-smtp-config" | "send-failed" | "already-sending";
 
 type DispatchResult =
@@ -68,6 +68,7 @@ const getSmtpConfig = () => {
   const smtpUser = process.env["SMTP_USER"]?.trim();
   const smtpPass = process.env["SMTP_PASS"]?.trim();
   const fromAddress = process.env["SMTP_FROM"]?.trim() ?? smtpUser ?? "no-reply@thedivinewithin.com";
+  const fallbackToAddress = process.env["ORDER_EMAIL_TO"]?.trim() ?? fromAddress;
 
   return {
     smtpHost,
@@ -75,11 +76,12 @@ const getSmtpConfig = () => {
     smtpUser,
     smtpPass,
     fromAddress,
+    fallbackToAddress,
   };
 };
 
 const createTransporter = () => {
-  const { smtpHost, smtpPort, smtpUser, smtpPass, fromAddress } = getSmtpConfig();
+  const { smtpHost, smtpPort, smtpUser, smtpPass, fromAddress, fallbackToAddress } = getSmtpConfig();
 
   if (!smtpHost || !smtpUser || !smtpPass) {
     return { ready: false as const, reason: "missing-smtp-config" as const };
@@ -99,7 +101,7 @@ const createTransporter = () => {
     },
   });
 
-  return { ready: true as const, transporter, fromAddress };
+  return { ready: true as const, transporter, fromAddress, fallbackToAddress };
 };
 
 export const addStockSubscriber = (email: string) => {
@@ -153,9 +155,6 @@ const sendRestockDigestEmail = async (updates: RestockUpdatePayload[]): Promise<
   }
 
   const subscribers = getStockSubscribers();
-  if (!subscribers.length) {
-    return { success: true, sentCount: 0, reason: "no-subscribers" };
-  }
 
   const transporterState = createTransporter();
   if (!transporterState.ready) {
@@ -172,22 +171,33 @@ const sendRestockDigestEmail = async (updates: RestockUpdatePayload[]): Promise<
 
   try {
     await transporterState.transporter.verify();
+
+    const hasSubscribers = subscribers.length > 0;
+    const toAddress = hasSubscribers
+      ? transporterState.fromAddress
+      : transporterState.fallbackToAddress;
+
     await transporterState.transporter.sendMail({
       from: transporterState.fromAddress,
-      to: transporterState.fromAddress,
-      bcc: subscribers,
+      to: toAddress,
+      ...(hasSubscribers ? { bcc: subscribers } : {}),
       subject: "The Divine Within restock update",
       text: [
         "New stock is available.",
         "",
         "This update includes all recent restocks:",
         updateLines,
+        hasSubscribers ? "" : "(Sent to the store inbox because no subscribers were stored in memory.)",
         "",
         "Visit the store to order while it is available.",
       ].join("\n"),
     });
 
-    return { success: true, sentCount: subscribers.length, reason: "sent" };
+    return {
+      success: true,
+      sentCount: hasSubscribers ? subscribers.length : 1,
+      reason: hasSubscribers ? "sent" : "sent-fallback",
+    };
   } catch (error) {
     return {
       success: false,
