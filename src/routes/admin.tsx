@@ -4,7 +4,7 @@ import { getRequestIP, useSession } from "@tanstack/react-start/server";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { SIZES, stockLabel, useInventory } from "@/lib/inventory";
-import { queueRestockUpdateEmail } from "@/lib/stock-updates";
+import { flushQueuedRestockUpdates, queueRestockUpdateEmail } from "@/lib/stock-updates";
 import { isRateLimited, sanitizeText } from "@/lib/security";
 
 export const Route = createFileRoute("/admin")({
@@ -92,16 +92,23 @@ const sendRestockNotification = createServerFn({ method: "POST" })
     return queueRestockUpdateEmail(data);
   });
 
+const confirmRestockNotification = createServerFn({ method: "POST" }).handler(async () => {
+  return flushQueuedRestockUpdates();
+});
+
 function AdminInventory() {
   const { inventory, hydrated, setStock, reset } = useInventory();
   const checkSession = useServerFn(adminSessionCheck);
   const login = useServerFn(adminLogin);
   const logout = useServerFn(adminLogout);
   const notifyRestock = useServerFn(sendRestockNotification);
+  const confirmRestock = useServerFn(confirmRestockNotification);
   const [credentials, setCredentials] = useState({ username: "", password: "" });
   const [error, setError] = useState("");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [restockMessage, setRestockMessage] = useState("");
+  const [queuedRestockCount, setQueuedRestockCount] = useState(0);
+  const [isConfirmingRestock, setIsConfirmingRestock] = useState(false);
 
   useEffect(() => {
     const verifySession = async () => {
@@ -161,14 +168,36 @@ function AdminInventory() {
         });
 
         if (result?.success && typeof result.queuedCount === "number") {
+          setQueuedRestockCount(result.queuedCount);
           setRestockMessage(
-            `Restock queued. We will send one combined email in about ${result.sendsInSeconds}s (${result.queuedCount} item${result.queuedCount === 1 ? "" : "s"} queued).`,
+            `Restock queued. ${result.queuedCount} item${result.queuedCount === 1 ? "" : "s"} waiting for confirmation email.`,
           );
         }
       } catch (notifyError) {
         console.error("Restock notification failed:", notifyError);
         setRestockMessage("Stock updated, but we could not send restock emails.");
       }
+    }
+  };
+
+  const handleConfirmStock = async () => {
+    setIsConfirmingRestock(true);
+
+    try {
+      const result = await confirmRestock();
+      if (result?.success) {
+        if (typeof result.sentCount === "number" && result.sentCount > 0) {
+          setRestockMessage(`Combined stock email sent to ${result.sentCount} subscriber${result.sentCount === 1 ? "" : "s"}.`);
+          setQueuedRestockCount(0);
+        } else {
+          setRestockMessage("No queued stock updates to send right now.");
+        }
+      }
+    } catch (confirmError) {
+      console.error("Confirm stock email failed:", confirmError);
+      setRestockMessage("Could not send the confirmation stock email. Please try again.");
+    } finally {
+      setIsConfirmingRestock(false);
     }
   };
 
@@ -250,6 +279,13 @@ function AdminInventory() {
             className="px-6 py-3 border border-white/20 text-xs font-bold uppercase tracking-widest hover:border-brand-red hover:text-brand-red transition-colors"
           >
             Reset stock
+          </button>
+          <button
+            onClick={() => void handleConfirmStock()}
+            disabled={isConfirmingRestock || queuedRestockCount === 0}
+            className="px-6 py-3 border border-brand-red/60 text-xs font-bold uppercase tracking-widest text-brand-red hover:bg-brand-red hover:text-brand-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isConfirmingRestock ? "Sending..." : `Confirm Stock (${queuedRestockCount})`}
           </button>
           <button
             onClick={handleLogout}

@@ -13,10 +13,7 @@ type RestockUpdatePayload = {
 
 type RestockDigestStore = {
   pending: RestockUpdatePayload[];
-  timer: ReturnType<typeof setTimeout> | null;
 };
-
-const RESTOCK_DIGEST_WINDOW_MS = 90_000;
 
 const getSubscriberStore = (): SubscriberStore => {
   const globalState = globalThis as typeof globalThis & {
@@ -36,7 +33,7 @@ const getRestockDigestStore = (): RestockDigestStore => {
   };
 
   if (!globalState.__tdwRestockDigestStore) {
-    globalState.__tdwRestockDigestStore = { pending: [], timer: null };
+    globalState.__tdwRestockDigestStore = { pending: [] };
   }
 
   return globalState.__tdwRestockDigestStore;
@@ -179,18 +176,9 @@ export const queueRestockUpdateEmail = async (payload: RestockUpdatePayload) => 
     digestStore.pending.push(payload);
   }
 
-  if (digestStore.timer) {
-    clearTimeout(digestStore.timer);
-  }
-
-  digestStore.timer = setTimeout(() => {
-    void flushQueuedRestockUpdates();
-  }, RESTOCK_DIGEST_WINDOW_MS);
-
   return {
     success: true as const,
     queuedCount: digestStore.pending.length,
-    sendsInSeconds: Math.floor(RESTOCK_DIGEST_WINDOW_MS / 1000),
   };
 };
 
@@ -198,13 +186,11 @@ export const flushQueuedRestockUpdates = async () => {
   const digestStore = getRestockDigestStore();
 
   if (!digestStore.pending.length) {
-    digestStore.timer = null;
     return { success: true as const, sentCount: 0, reason: "no-updates" as const };
   }
 
   const updatesToSend = [...digestStore.pending];
   digestStore.pending = [];
-  digestStore.timer = null;
 
   return sendRestockDigestEmail(updatesToSend);
 };
