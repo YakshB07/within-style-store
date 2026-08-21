@@ -347,13 +347,17 @@ const subscribeToStockUpdates = createServerFn({ method: "POST" })
     const normalizedEmail = data.email.trim().toLowerCase();
     const { alreadySubscribed } = addStockSubscriber(normalizedEmail);
 
-    try {
-      await sendSubscriptionConfirmationEmail(normalizedEmail);
-    } catch (error) {
-      console.error("Subscription confirmation email failed:", error);
+    const confirmationResult = await sendSubscriptionConfirmationEmail(normalizedEmail);
+    if (!confirmationResult.success) {
+      console.warn("Subscription confirmation email failed:", confirmationResult.reason);
     }
 
-    return { success: true, alreadySubscribed };
+    return {
+      success: true,
+      alreadySubscribed,
+      confirmationEmailSent: confirmationResult.success,
+      confirmationReason: confirmationResult.success ? null : confirmationResult.reason,
+    };
   });
 
 const stripePromise = import.meta.env["VITE_STRIPE_PUBLISHABLE_KEY"]
@@ -845,11 +849,17 @@ function Index() {
       });
 
       if (result?.success) {
-        setSubscribeStatus(
-          result.alreadySubscribed
-            ? "You are already subscribed for stock updates."
-            : "Subscribed. You will get updates when new stock comes in.",
-        );
+        if (result.confirmationEmailSent) {
+          setSubscribeStatus(
+            result.alreadySubscribed
+              ? "You are already subscribed for stock updates."
+              : "Subscribed. You will get updates when new stock comes in.",
+          );
+        } else {
+          setSubscribeStatus(
+            "Subscribed successfully, but confirmation email could not be sent right now.",
+          );
+        }
         setIsSubscribed(true);
         setSubscriberEmail("");
       }
