@@ -4,6 +4,7 @@ import { getRequestIP, useSession } from "@tanstack/react-start/server";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { SIZES, stockLabel, useInventory } from "@/lib/inventory";
+import { sendRestockUpdateEmails } from "@/lib/stock-updates";
 import { isRateLimited, sanitizeText } from "@/lib/security";
 
 export const Route = createFileRoute("/admin")({
@@ -61,7 +62,7 @@ const adminLogin = createServerFn({ method: "POST" })
     }
 
     const configuredUsername = process.env.ADMIN_USERNAME?.trim() || "admin";
-    const configuredPassword = process.env.ADMIN_PASSWORD?.trim() || "divinewithin";
+    const configuredPassword = process.env.ADMIN_PASSWORD?.trim() || "Nidhim123!";
 
     if (username !== configuredUsername.toLowerCase() || password !== configuredPassword) {
       return { success: false, reason: "invalid-credentials" };
@@ -78,14 +79,29 @@ const adminLogout = createServerFn({ method: "POST" }).handler(async () => {
   return { success: true };
 });
 
+const sendRestockNotification = createServerFn({ method: "POST" })
+  .validator(
+    z.object({
+      productName: z.string().min(1),
+      size: z.string().min(1),
+      previousQty: z.number().int().min(0),
+      newQty: z.number().int().min(0),
+    }),
+  )
+  .handler(async ({ data }) => {
+    return sendRestockUpdateEmails(data);
+  });
+
 function AdminInventory() {
   const { inventory, hydrated, setStock, reset } = useInventory();
   const checkSession = useServerFn(adminSessionCheck);
   const login = useServerFn(adminLogin);
   const logout = useServerFn(adminLogout);
+  const notifyRestock = useServerFn(sendRestockNotification);
   const [credentials, setCredentials] = useState({ username: "", password: "" });
   const [error, setError] = useState("");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [restockMessage, setRestockMessage] = useState("");
 
   useEffect(() => {
     const verifySession = async () => {
@@ -125,6 +141,37 @@ function AdminInventory() {
     setIsAuthenticated(false);
     setCredentials({ username: "", password: "" });
     setError("");
+  };
+
+  const handleStockUpdate = async (productId: string, productName: string, size: string, nextQtyRaw: number) => {
+    const nextQty = Number.isFinite(nextQtyRaw) ? Math.max(0, Math.floor(nextQtyRaw)) : 0;
+    const previousQty = inventory[productId]?.[size] ?? 0;
+
+    setStock(productId, size as never, nextQty);
+
+    if (previousQty <= 0 && nextQty > 0) {
+      try {
+        const result = await notifyRestock({
+          data: {
+            productName,
+            size,
+            previousQty,
+            newQty: nextQty,
+          },
+        });
+
+        if (result?.success && typeof result.sentCount === "number") {
+          setRestockMessage(
+            result.sentCount > 0
+              ? `Restock update sent to ${result.sentCount} subscriber${result.sentCount === 1 ? "" : "s"}.`
+              : "Stock updated. No subscribers to notify yet.",
+          );
+        }
+      } catch (notifyError) {
+        console.error("Restock notification failed:", notifyError);
+        setRestockMessage("Stock updated, but we could not send restock emails.");
+      }
+    }
   };
 
   if (!isAuthenticated) {
@@ -226,6 +273,12 @@ function AdminInventory() {
         “Only — left in stock” alert on the storefront; zero marks the size sold out.
       </p>
 
+      {restockMessage && (
+        <p className="mb-8 text-xs uppercase tracking-widest text-brand-red">
+          {restockMessage}
+        </p>
+      )}
+
       <div className="space-y-12">
         {PRODUCTS.map((product) => (
           <section key={product.id}>
@@ -261,7 +314,7 @@ function AdminInventory() {
                     </div>
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => setStock(product.id, size, qty - 1)}
+                        onClick={() => void handleStockUpdate(product.id, product.name, size, qty - 1)}
                         className="size-10 border border-white/20 hover:border-brand-red hover:text-brand-red transition-colors"
                         aria-label={`Decrease ${product.name} size ${size} stock`}
                       >
@@ -275,11 +328,11 @@ function AdminInventory() {
                         type="number"
                         min={0}
                         value={qty}
-                        onChange={(e) => setStock(product.id, size, Number(e.target.value))}
+                        onChange={(e) => void handleStockUpdate(product.id, product.name, size, Number(e.target.value))}
                         className="w-full bg-transparent border border-white/20 py-2 text-center font-display font-extrabold text-lg outline-none focus:border-brand-red transition-colors"
                       />
                       <button
-                        onClick={() => setStock(product.id, size, qty + 1)}
+                        onClick={() => void handleStockUpdate(product.id, product.name, size, qty + 1)}
                         className="size-10 border border-white/20 hover:border-brand-red hover:text-brand-red transition-colors"
                         aria-label={`Increase ${product.name} size ${size} stock`}
                       >

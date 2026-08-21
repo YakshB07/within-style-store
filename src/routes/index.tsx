@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import nodemailer from "nodemailer";
 import { SIZES, stockLabel, useInventory, type Size } from "@/lib/inventory";
+import { addStockSubscriber, sendSubscriptionConfirmationEmail } from "@/lib/stock-updates";
 import heroHoodie from "@/assets/hero-hoodie.jpg";
 import zipupHoodie from "@/assets/zipup-hoodie.jpg";
 import pulloverHoodie from "@/assets/pullover-hoodie.jpg";
@@ -50,6 +51,14 @@ const products = [
 ];
 
 const ORDERS_STORAGE_KEY = "tdw-orders-v1";
+const PICKUP_LOCATION = {
+  name: "Lambton Hall, Western University",
+  addressLine1: "40 University Dr",
+  city: "London",
+  province: "Ontario",
+  postalCode: "N6A 3K7",
+  country: "Canada",
+};
 
 const canadaProvinces = [
   "Alberta",
@@ -156,8 +165,8 @@ const createStripePaymentIntent = createServerFn({ method: "POST" })
   )
   .handler(async ({ data }) => {
     try {
-      const stripeSecretKey = process.env.STRIPE_SECRET_KEY?.trim();
-      const publishableKey = process.env.VITE_STRIPE_PUBLISHABLE_KEY?.trim();
+      const stripeSecretKey = process.env["STRIPE_SECRET_KEY"]?.trim();
+      const publishableKey = process.env["VITE_STRIPE_PUBLISHABLE_KEY"]?.trim();
 
       if (!stripeSecretKey || !publishableKey) {
         return { success: false, reason: "missing-stripe-config" };
@@ -165,7 +174,7 @@ const createStripePaymentIntent = createServerFn({ method: "POST" })
 
       const Stripe = (await import("stripe")).default;
       const stripe = new Stripe(stripeSecretKey, {
-        apiVersion: "2025-02-24.acacia",
+        apiVersion: "2026-07-29.dahlia",
       });
 
       const paymentIntent = await stripe.paymentIntents.create({
@@ -175,7 +184,7 @@ const createStripePaymentIntent = createServerFn({ method: "POST" })
         metadata: {
           orderId: data.orderId,
         },
-        receipt_email: data.email,
+        ...(data.email ? { receipt_email: data.email } : {}),
         automatic_payment_methods: {
           enabled: true,
         },
@@ -200,6 +209,7 @@ const sendOrderEmail = createServerFn({ method: "POST" })
   .validator(
     z.object({
       id: z.string(),
+      fulfillmentMethod: z.enum(["shipping", "pickup"]),
       customer: z.object({
         firstName: z.string(),
         lastName: z.string(),
@@ -223,6 +233,16 @@ const sendOrderEmail = createServerFn({ method: "POST" })
           price: z.number(),
         }),
       ),
+      pickupLocation: z
+        .object({
+          name: z.string(),
+          addressLine1: z.string(),
+          city: z.string(),
+          province: z.string(),
+          postalCode: z.string(),
+          country: z.string(),
+        })
+        .optional(),
       subtotal: z.number(),
       tax: z.number(),
       shippingCost: z.number(),
@@ -245,6 +265,16 @@ const sendOrderEmail = createServerFn({ method: "POST" })
       .filter(Boolean)
       .join("\n");
 
+    const pickupLocationText = data.pickupLocation
+      ? [
+          data.pickupLocation.name,
+          data.pickupLocation.addressLine1,
+          `${data.pickupLocation.city}, ${data.pickupLocation.province}`,
+          data.pickupLocation.postalCode,
+          data.pickupLocation.country,
+        ].join("\n")
+      : "";
+
     const text = [
       "Someone sent an order from The Divine Within.",
       "",
@@ -253,8 +283,9 @@ const sendOrderEmail = createServerFn({ method: "POST" })
       `Last Name: ${data.customer.lastName}`,
       `Email: ${data.customer.email}`,
       `Phone: ${data.customer.phone}`,
-      "Shipping Address:",
-      shippingAddressText,
+      `Fulfillment: ${data.fulfillmentMethod === "pickup" ? "Pickup" : "Shipping"}`,
+      data.fulfillmentMethod === "pickup" ? "Pickup Location:" : "Shipping Address:",
+      data.fulfillmentMethod === "pickup" ? pickupLocationText : shippingAddressText,
       `Payment Method: ${data.customer.payment}`,
       "",
       "Order Items:",
@@ -268,12 +299,12 @@ const sendOrderEmail = createServerFn({ method: "POST" })
       "Please prepare this order for fulfillment.",
     ].join("\n");
 
-    const smtpHost = process.env.SMTP_HOST?.trim();
-    const smtpPort = Number(process.env.SMTP_PORT ?? "587");
-    const smtpUser = process.env.SMTP_USER?.trim();
-    const smtpPass = process.env.SMTP_PASS?.trim();
-    const toAddress = process.env.ORDER_EMAIL_TO?.trim() ?? "OPinox007@gmail.com";
-    const fromAddress = process.env.SMTP_FROM?.trim() ?? smtpUser ?? "no-reply@thedivinewithin.com";
+    const smtpHost = process.env["SMTP_HOST"]?.trim();
+    const smtpPort = Number(process.env["SMTP_PORT"] ?? "587");
+    const smtpUser = process.env["SMTP_USER"]?.trim();
+    const smtpPass = process.env["SMTP_PASS"]?.trim();
+    const toAddress = process.env["ORDER_EMAIL_TO"]?.trim() ?? "OPinox007@gmail.com";
+    const fromAddress = process.env["SMTP_FROM"]?.trim() ?? smtpUser ?? "no-reply@thedivinewithin.com";
 
     if (!smtpHost || !smtpUser || !smtpPass) {
       console.warn("Order email skipped because SMTP environment variables are not configured.");
@@ -306,8 +337,27 @@ const sendOrderEmail = createServerFn({ method: "POST" })
     return { success: true };
   });
 
-const stripePromise = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY
-  ? loadStripe(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY)
+const subscribeToStockUpdates = createServerFn({ method: "POST" })
+  .validator(
+    z.object({
+      email: z.string().email(),
+    }),
+  )
+  .handler(async ({ data }) => {
+    const normalizedEmail = data.email.trim().toLowerCase();
+    const { alreadySubscribed } = addStockSubscriber(normalizedEmail);
+
+    try {
+      await sendSubscriptionConfirmationEmail(normalizedEmail);
+    } catch (error) {
+      console.error("Subscription confirmation email failed:", error);
+    }
+
+    return { success: true, alreadySubscribed };
+  });
+
+const stripePromise = import.meta.env["VITE_STRIPE_PUBLISHABLE_KEY"]
+  ? loadStripe(import.meta.env["VITE_STRIPE_PUBLISHABLE_KEY"])
   : null;
 
 type CheckoutPaymentFormProps = {
@@ -389,11 +439,13 @@ function CheckoutPaymentForm({ clientSecret, onSubmitOrder, paymentError, setPay
 function Index() {
   const sendEmail = useServerFn(sendOrderEmail);
   const createPaymentIntent = useServerFn(createStripePaymentIntent);
-  const stripeEnabled = Boolean(import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY?.trim());
+  const subscribe = useServerFn(subscribeToStockUpdates);
+  const stripeEnabled = Boolean(import.meta.env["VITE_STRIPE_PUBLISHABLE_KEY"]?.trim());
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [cart, setCart] = useState<{ id: string; size: string; name: string; price: number }[]>([]);
   const [recentOrder, setRecentOrder] = useState<null | {
     id: string;
+    fulfillmentMethod: "shipping" | "pickup";
     customer: { firstName: string; lastName: string; email: string; phone: string; payment: string };
     shippingAddress: {
       fullName: string;
@@ -403,6 +455,14 @@ function Index() {
       province: string;
       postalCode: string;
       phone: string;
+    };
+    pickupLocation?: {
+      name: string;
+      addressLine1: string;
+      city: string;
+      province: string;
+      postalCode: string;
+      country: string;
     };
     items: { name: string; size: string; price: number }[];
     subtotal: number;
@@ -430,6 +490,7 @@ function Index() {
     postalCode: "",
     shippingPhone: "",
   });
+  const [fulfillmentMethod, setFulfillmentMethod] = useState<"shipping" | "pickup">("shipping");
   const [submitAttempted, setSubmitAttempted] = useState(false);
   const [shippingCost, setShippingCost] = useState(0);
   const [shippingCostError, setShippingCostError] = useState("");
@@ -438,13 +499,26 @@ function Index() {
   const [orderId, setOrderId] = useState<string | null>(null);
   const [paymentError, setPaymentError] = useState("");
   const [isPreparingPayment, setIsPreparingPayment] = useState(false);
-  const paymentShippingSnapshotRef = useRef<{ postalCode: string; province: string } | null>(null);
+  const [subscriberEmail, setSubscriberEmail] = useState("");
+  const [isSubscribing, setIsSubscribing] = useState(false);
+  const [isSubscribed, setIsSubscribed] = useState(false);
+  const [subscribeStatus, setSubscribeStatus] = useState("");
+  const [subscribeError, setSubscribeError] = useState("");
+  const paymentShippingSnapshotRef = useRef<{ method: "shipping" | "pickup"; postalCode: string; province: string } | null>(null);
 
   const subtotal = cart.reduce((sum, item) => sum + item.price, 0);
   const tax = subtotal * 0.13;
-  const total = subtotal + tax + shippingCost;
+  const effectiveShippingCost = fulfillmentMethod === "pickup" ? 0 : shippingCost;
+  const total = subtotal + tax + effectiveShippingCost;
 
   useEffect(() => {
+    if (fulfillmentMethod === "pickup") {
+      setShippingCost(0);
+      setShippingCostError("");
+      setIsCalculatingShippingCost(false);
+      return;
+    }
+
     const normalizedPostalCode = normalizePostalCode(checkout.postalCode);
 
     if (!normalizedPostalCode || !isValidCanadianPostalCode(normalizedPostalCode)) {
@@ -473,7 +547,7 @@ function Index() {
     setShippingCost(nextShippingCost);
     setShippingCostError("");
     setIsCalculatingShippingCost(false);
-  }, [checkout.postalCode, checkout.province]);
+  }, [checkout.postalCode, checkout.province, fulfillmentMethod]);
 
   const addToCart = (productId: string) => {
     const product = products.find((p) => p.id === productId);
@@ -511,9 +585,9 @@ function Index() {
         : ""
     : "";
   const shippingFullNameError = submitAttempted && !checkout.shippingFullName.trim() ? "Please fill out this field." : "";
-  const addressLine1Error = submitAttempted && !checkout.addressLine1.trim() ? "Please fill out this field." : "";
-  const cityError = submitAttempted && !checkout.city.trim() ? "Please fill out this field." : "";
-  const provinceError = submitAttempted && !checkout.province.trim() ? "Please fill out this field." : "";
+  const addressLine1Error = submitAttempted && fulfillmentMethod === "shipping" && !checkout.addressLine1.trim() ? "Please fill out this field." : "";
+  const cityError = submitAttempted && fulfillmentMethod === "shipping" && !checkout.city.trim() ? "Please fill out this field." : "";
+  const provinceError = submitAttempted && fulfillmentMethod === "shipping" && !checkout.province.trim() ? "Please fill out this field." : "";
   const shippingPhoneError = submitAttempted
     ? !checkout.shippingPhone.trim()
       ? "Please fill out this field."
@@ -522,7 +596,9 @@ function Index() {
         : ""
     : "";
   const postalCodeError = submitAttempted
-    ? !checkout.postalCode.trim()
+    ? fulfillmentMethod !== "shipping"
+      ? ""
+      : !checkout.postalCode.trim()
       ? "Please fill out this field."
       : !isValidCanadianPostalCode(checkout.postalCode)
         ? "Please enter a valid Canadian postal code format (A1A 1A1)."
@@ -533,17 +609,18 @@ function Index() {
     if (!clientSecret || !paymentShippingSnapshotRef.current) return;
 
     const snapshot = paymentShippingSnapshotRef.current;
+    const methodChanged = fulfillmentMethod !== snapshot.method;
     const currentPostal = normalizePostalCode(checkout.postalCode);
     const provinceChanged = checkout.province.trim() !== snapshot.province;
     const postalChanged = currentPostal !== snapshot.postalCode;
 
-    if (postalChanged || provinceChanged) {
+    if (methodChanged || postalChanged || provinceChanged) {
       setClientSecret(null);
       setOrderId(null);
       paymentShippingSnapshotRef.current = null;
       setPaymentError("");
     }
-  }, [checkout.postalCode, checkout.province, clientSecret]);
+  }, [checkout.postalCode, checkout.province, fulfillmentMethod, clientSecret]);
 
   const handlePlaceOrder = async () => {
     if (!cart.length) return;
@@ -553,8 +630,10 @@ function Index() {
     }
 
     const normalizedPostalCode = normalizePostalCode(checkout.postalCode);
+    const isPickup = fulfillmentMethod === "pickup";
     const orderRecord = {
       id: orderId,
+      fulfillmentMethod,
       customer: {
         firstName: checkout.firstName.trim(),
         lastName: checkout.lastName.trim(),
@@ -564,17 +643,18 @@ function Index() {
       },
       shippingAddress: {
         fullName: checkout.shippingFullName.trim(),
-        addressLine1: checkout.addressLine1.trim(),
-        addressLine2: checkout.addressLine2.trim(),
-        city: checkout.city.trim(),
-        province: checkout.province,
-        postalCode: normalizedPostalCode,
+        addressLine1: isPickup ? PICKUP_LOCATION.addressLine1 : checkout.addressLine1.trim(),
+        addressLine2: isPickup ? PICKUP_LOCATION.name : checkout.addressLine2.trim(),
+        city: isPickup ? PICKUP_LOCATION.city : checkout.city.trim(),
+        province: isPickup ? PICKUP_LOCATION.province : checkout.province,
+        postalCode: isPickup ? PICKUP_LOCATION.postalCode : normalizedPostalCode,
         phone: checkout.shippingPhone.trim(),
       },
+      ...(isPickup ? { pickupLocation: PICKUP_LOCATION } : {}),
       items: cart.map((item) => ({ name: item.name, size: item.size, price: item.price })),
       subtotal,
       tax,
-      shippingCost,
+      shippingCost: effectiveShippingCost,
       total,
       placedAt: new Date().toISOString(),
     };
@@ -652,23 +732,27 @@ function Index() {
       checkout.lastName,
       checkout.email,
       checkout.shippingFullName,
-      checkout.addressLine1,
-      checkout.city,
-      checkout.province,
-      checkout.postalCode,
       checkout.shippingPhone,
     ];
+
+    if (fulfillmentMethod === "shipping") {
+      requiredFields.push(checkout.addressLine1, checkout.city, checkout.province, checkout.postalCode);
+    }
 
     if (requiredFields.some((field) => !field.trim())) {
       setShippingCostError("Please fill out all required fields above before placing the order.");
       return;
     }
 
-    if (!isValidEmail(checkout.email) || !isValidPhone(checkout.shippingPhone) || !isValidCanadianPostalCode(checkout.postalCode)) {
+    if (!isValidEmail(checkout.email) || !isValidPhone(checkout.shippingPhone)) {
       return;
     }
 
-    if (shippingCostError || !shippingCost) {
+    if (fulfillmentMethod === "shipping" && !isValidCanadianPostalCode(checkout.postalCode)) {
+      return;
+    }
+
+    if (fulfillmentMethod === "shipping" && (shippingCostError || !shippingCost)) {
       setShippingCostError("Please enter a valid Canadian postal code to calculate shipping.");
       return;
     }
@@ -714,8 +798,9 @@ function Index() {
       }
 
       paymentShippingSnapshotRef.current = {
-        postalCode: normalizePostalCode(checkout.postalCode),
-        province: checkout.province.trim(),
+        method: fulfillmentMethod,
+        postalCode: fulfillmentMethod === "shipping" ? normalizePostalCode(checkout.postalCode) : "",
+        province: fulfillmentMethod === "shipping" ? checkout.province.trim() : "",
       };
       setClientSecret(paymentResult.clientSecret);
     } catch (error) {
@@ -738,6 +823,41 @@ function Index() {
     if (el) {
       el.scrollIntoView({ behavior: "smooth" });
       setMobileMenuOpen(false);
+    }
+  };
+
+  const handleStockSignup = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSubscribeStatus("");
+    setSubscribeError("");
+    setIsSubscribed(false);
+
+    if (!isValidEmail(subscriberEmail)) {
+      setSubscribeError("Please enter a valid email address.");
+      return;
+    }
+
+    setIsSubscribing(true);
+
+    try {
+      const result = await subscribe({
+        data: { email: subscriberEmail.trim() },
+      });
+
+      if (result?.success) {
+        setSubscribeStatus(
+          result.alreadySubscribed
+            ? "You are already subscribed for stock updates."
+            : "Subscribed. You will get updates when new stock comes in.",
+        );
+        setIsSubscribed(true);
+        setSubscriberEmail("");
+      }
+    } catch (error) {
+      console.error("Subscription failed:", error);
+      setSubscribeError("We could not subscribe you right now. Please try again.");
+    } finally {
+      setIsSubscribing(false);
     }
   };
 
@@ -963,7 +1083,9 @@ function Index() {
               Thank you, {recentOrder.customer.firstName}!
             </h2>
             <p className="text-muted-foreground mb-8">
-              Your order has been received and is being prepared for fulfillment.
+              {recentOrder.fulfillmentMethod === "pickup"
+                ? "Your order has been received. We will contact you when your order is ready for pickup."
+                : "Your order has been received and is being prepared for fulfillment."}
             </p>
 
             <div className="grid md:grid-cols-2 gap-6 text-left mb-10">
@@ -987,6 +1109,18 @@ function Index() {
                 ))}
               </ul>
             </div>
+
+            {recentOrder.fulfillmentMethod === "pickup" && recentOrder.pickupLocation && (
+              <div className="border border-white/10 bg-brand-black/40 p-5 text-left mb-8">
+                <p className="text-[10px] uppercase tracking-widest text-brand-red mb-3">Pickup Location</p>
+                <p className="text-sm text-brand-white font-semibold">{recentOrder.pickupLocation.name}</p>
+                <p className="text-sm text-muted-foreground">{recentOrder.pickupLocation.addressLine1}</p>
+                <p className="text-sm text-muted-foreground">
+                  {recentOrder.pickupLocation.city}, {recentOrder.pickupLocation.province} {recentOrder.pickupLocation.postalCode}
+                </p>
+                <p className="text-sm text-muted-foreground">{recentOrder.pickupLocation.country}</p>
+              </div>
+            )}
 
             <button
               type="button"
@@ -1046,7 +1180,9 @@ function Index() {
                   <div className="flex justify-between text-sm text-muted-foreground mb-6">
                     <span>Shipping</span>
                     <span>
-                      {checkout.postalCode.trim() && isValidCanadianPostalCode(checkout.postalCode)
+                      {fulfillmentMethod === "pickup"
+                        ? "$0.00 (Pickup)"
+                        : checkout.postalCode.trim() && isValidCanadianPostalCode(checkout.postalCode)
                         ? `$${shippingCost.toFixed(2)}`
                         : "Calculated on Postal Code"}
                     </span>
@@ -1109,10 +1245,51 @@ function Index() {
                       {emailError && <p className="mt-2 text-xs text-brand-red">{emailError}</p>}
                     </div>
 
-<div className="space-y-4 border border-white/10 bg-brand-grey/40 p-4 rounded-xl">
+                    <div className="space-y-4 border border-white/10 bg-brand-grey/40 p-4 rounded-xl">
                       <div>
-                        <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">Shipping Details</label>
+                        <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">Delivery Method</label>
+                        <div className="grid sm:grid-cols-2 gap-3">
+                          <button
+                            type="button"
+                            onClick={() => setFulfillmentMethod("shipping")}
+                            className={`border px-3 py-2 text-xs font-bold uppercase tracking-widest transition-colors ${
+                              fulfillmentMethod === "shipping"
+                                ? "border-brand-red bg-brand-red text-brand-white"
+                                : "border-white/20 bg-brand-black/30 text-brand-white hover:border-brand-red"
+                            }`}
+                          >
+                            Ship to Address
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setFulfillmentMethod("pickup")}
+                            className={`border px-3 py-2 text-xs font-bold uppercase tracking-widest transition-colors ${
+                              fulfillmentMethod === "pickup"
+                                ? "border-brand-red bg-brand-red text-brand-white"
+                                : "border-white/20 bg-brand-black/30 text-brand-white hover:border-brand-red"
+                            }`}
+                          >
+                            Pick Up Myself
+                          </button>
+                        </div>
                       </div>
+
+                      {fulfillmentMethod === "pickup" ? (
+                        <div className="rounded-lg border border-brand-red/40 bg-brand-black/40 p-4 text-sm text-muted-foreground">
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-brand-red mb-2">Pickup Location</p>
+                          <p className="text-brand-white font-semibold">{PICKUP_LOCATION.name}</p>
+                          <p>{PICKUP_LOCATION.addressLine1}</p>
+                          <p>
+                            {PICKUP_LOCATION.city}, {PICKUP_LOCATION.province} {PICKUP_LOCATION.postalCode}
+                          </p>
+                          <p>{PICKUP_LOCATION.country}</p>
+                          <p className="mt-3 text-brand-red text-xs uppercase tracking-widest">Shipping is free for pickup orders.</p>
+                        </div>
+                      ) : (
+                        <div>
+                          <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">Shipping Details</label>
+                        </div>
+                      )}
 
                       <div>
                         <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
@@ -1131,105 +1308,109 @@ function Index() {
                         {shippingFullNameError && <p className="mt-2 text-xs text-brand-red">{shippingFullNameError}</p>}
                       </div>
 
-                      <div>
-                        <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
-                          Street Address 1 <span className="text-brand-red">*</span>
-                        </label>
-                        <input
-                          type="text"
-                          value={checkout.addressLine1}
-                          onChange={(event) => handleCheckoutChange("addressLine1", event.target.value)}
-                          aria-invalid={Boolean(addressLine1Error)}
-                          className={`w-full bg-brand-grey border px-3 py-2 text-sm text-brand-white outline-none focus:border-brand-red ${
-                            addressLine1Error ? "border-brand-red" : "border-white/10"
-                          }`}
-                          required
-                        />
-                        {addressLine1Error && <p className="mt-2 text-xs text-brand-red">{addressLine1Error}</p>}
-                      </div>
+                      {fulfillmentMethod === "shipping" && (
+                        <>
+                          <div>
+                            <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
+                              Street Address 1 <span className="text-brand-red">*</span>
+                            </label>
+                            <input
+                              type="text"
+                              value={checkout.addressLine1}
+                              onChange={(event) => handleCheckoutChange("addressLine1", event.target.value)}
+                              aria-invalid={Boolean(addressLine1Error)}
+                              className={`w-full bg-brand-grey border px-3 py-2 text-sm text-brand-white outline-none focus:border-brand-red ${
+                                addressLine1Error ? "border-brand-red" : "border-white/10"
+                              }`}
+                              required
+                            />
+                            {addressLine1Error && <p className="mt-2 text-xs text-brand-red">{addressLine1Error}</p>}
+                          </div>
 
-                      <div>
-                        <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">Street Address 2 (optional)</label>
-                        <input
-                          type="text"
-                          value={checkout.addressLine2}
-                          onChange={(event) => handleCheckoutChange("addressLine2", event.target.value)}
-                          className="w-full bg-brand-grey border border-white/10 px-3 py-2 text-sm text-brand-white outline-none focus:border-brand-red"
-                        />
-                      </div>
+                          <div>
+                            <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">Street Address 2 (optional)</label>
+                            <input
+                              type="text"
+                              value={checkout.addressLine2}
+                              onChange={(event) => handleCheckoutChange("addressLine2", event.target.value)}
+                              className="w-full bg-brand-grey border border-white/10 px-3 py-2 text-sm text-brand-white outline-none focus:border-brand-red"
+                            />
+                          </div>
 
-                      <div className="grid sm:grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
-                            City <span className="text-brand-red">*</span>
-                          </label>
-                          <input
-                            type="text"
-                            value={checkout.city}
-                            onChange={(event) => handleCheckoutChange("city", event.target.value)}
-                            aria-invalid={Boolean(cityError)}
-                            className={`w-full bg-brand-grey border px-3 py-2 text-sm text-brand-white outline-none focus:border-brand-red ${
-                              cityError ? "border-brand-red" : "border-white/10"
-                            }`}
-                            required
-                          />
-                          {cityError && <p className="mt-2 text-xs text-brand-red">{cityError}</p>}
-                        </div>
+                          <div className="grid sm:grid-cols-2 gap-4">
+                            <div>
+                              <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
+                                City <span className="text-brand-red">*</span>
+                              </label>
+                              <input
+                                type="text"
+                                value={checkout.city}
+                                onChange={(event) => handleCheckoutChange("city", event.target.value)}
+                                aria-invalid={Boolean(cityError)}
+                                className={`w-full bg-brand-grey border px-3 py-2 text-sm text-brand-white outline-none focus:border-brand-red ${
+                                  cityError ? "border-brand-red" : "border-white/10"
+                                }`}
+                                required
+                              />
+                              {cityError && <p className="mt-2 text-xs text-brand-red">{cityError}</p>}
+                            </div>
 
-                        <div>
-                          <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
-                            Province/Territory <span className="text-brand-red">*</span>
-                          </label>
-                          <select
-                            value={checkout.province}
-                            onChange={(event) => handleCheckoutChange("province", event.target.value)}
-                            aria-invalid={Boolean(provinceError)}
-                            className={`w-full bg-brand-grey border px-3 py-2 text-sm text-brand-white outline-none focus:border-brand-red ${
-                              provinceError ? "border-brand-red" : "border-white/10"
-                            }`}
-                            required
-                          >
-                            <option value="">Select</option>
-                            {canadaProvinces.map((province) => (
-                              <option key={province} value={province}>
-                                {province}
-                              </option>
-                            ))}
-                          </select>
-                          {provinceError && <p className="mt-2 text-xs text-brand-red">{provinceError}</p>}
-                        </div>
-                      </div>
+                            <div>
+                              <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
+                                Province/Territory <span className="text-brand-red">*</span>
+                              </label>
+                              <select
+                                value={checkout.province}
+                                onChange={(event) => handleCheckoutChange("province", event.target.value)}
+                                aria-invalid={Boolean(provinceError)}
+                                className={`w-full bg-brand-grey border px-3 py-2 text-sm text-brand-white outline-none focus:border-brand-red ${
+                                  provinceError ? "border-brand-red" : "border-white/10"
+                                }`}
+                                required
+                              >
+                                <option value="">Select</option>
+                                {canadaProvinces.map((province) => (
+                                  <option key={province} value={province}>
+                                    {province}
+                                  </option>
+                                ))}
+                              </select>
+                              {provinceError && <p className="mt-2 text-xs text-brand-red">{provinceError}</p>}
+                            </div>
+                          </div>
 
-                      <div>
-                        <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
-                          Postal Code <span className="text-brand-red">*</span>
-                        </label>
-                        <input
-                          type="text"
-                          value={checkout.postalCode}
-                          onChange={(event) => handleCheckoutChange("postalCode", event.target.value.toUpperCase())}
-                          aria-invalid={Boolean(postalCodeError || shippingCostError)}
-                          className={`w-full bg-brand-grey border px-3 py-2 text-sm text-brand-white outline-none focus:border-brand-red ${
-                            postalCodeError || shippingCostError ? "border-brand-red" : "border-white/10"
-                          }`}
-                          placeholder="A1A 1A1"
-                          required
-                        />
-                        {postalCodeError && <p className="mt-2 text-xs text-brand-red">{postalCodeError}</p>}
-                        {!postalCodeError && checkout.postalCode.trim() && !isValidCanadianPostalCode(checkout.postalCode) && (
-                          <p className="mt-2 text-xs text-brand-red">Please enter a valid Canadian postal code format.</p>
-                        )}
-                        {isCalculatingShippingCost && checkout.postalCode.trim() && (
-                          <p className="mt-2 text-xs text-white/70">Calculating shipping...</p>
-                        )}
-                        {!isCalculatingShippingCost && checkout.postalCode.trim() && isValidCanadianPostalCode(checkout.postalCode) && !shippingCostError && shippingCost > 0 && (
-                          <p className="mt-2 text-xs text-brand-red">Shipping: ${shippingCost.toFixed(2)}</p>
-                        )}
-                        {!isCalculatingShippingCost && checkout.postalCode.trim() && isValidCanadianPostalCode(checkout.postalCode) && !shippingCostError && shippingCost === 0 && (
-                          <p className="mt-2 text-xs text-brand-red">Shipping is being calculated for this postal code.</p>
-                        )}
-                        {shippingCostError && <p className="mt-2 text-xs text-brand-red">{shippingCostError}</p>}
-                      </div>
+                          <div>
+                            <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
+                              Postal Code <span className="text-brand-red">*</span>
+                            </label>
+                            <input
+                              type="text"
+                              value={checkout.postalCode}
+                              onChange={(event) => handleCheckoutChange("postalCode", event.target.value.toUpperCase())}
+                              aria-invalid={Boolean(postalCodeError || shippingCostError)}
+                              className={`w-full bg-brand-grey border px-3 py-2 text-sm text-brand-white outline-none focus:border-brand-red ${
+                                postalCodeError || shippingCostError ? "border-brand-red" : "border-white/10"
+                              }`}
+                              placeholder="A1A 1A1"
+                              required
+                            />
+                            {postalCodeError && <p className="mt-2 text-xs text-brand-red">{postalCodeError}</p>}
+                            {!postalCodeError && checkout.postalCode.trim() && !isValidCanadianPostalCode(checkout.postalCode) && (
+                              <p className="mt-2 text-xs text-brand-red">Please enter a valid Canadian postal code format.</p>
+                            )}
+                            {isCalculatingShippingCost && checkout.postalCode.trim() && (
+                              <p className="mt-2 text-xs text-white/70">Calculating shipping...</p>
+                            )}
+                            {!isCalculatingShippingCost && checkout.postalCode.trim() && isValidCanadianPostalCode(checkout.postalCode) && !shippingCostError && shippingCost > 0 && (
+                              <p className="mt-2 text-xs text-brand-red">Shipping: ${shippingCost.toFixed(2)}</p>
+                            )}
+                            {!isCalculatingShippingCost && checkout.postalCode.trim() && isValidCanadianPostalCode(checkout.postalCode) && !shippingCostError && shippingCost === 0 && (
+                              <p className="mt-2 text-xs text-brand-red">Shipping is being calculated for this postal code.</p>
+                            )}
+                            {shippingCostError && <p className="mt-2 text-xs text-brand-red">{shippingCostError}</p>}
+                          </div>
+                        </>
+                      )}
 
                       <div>
                         <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
@@ -1284,7 +1465,7 @@ function Index() {
                         </Elements>
                       ) : (
                         <div className="rounded-xl border border-white/10 bg-brand-grey/40 p-4 text-xs uppercase tracking-widest text-muted-foreground">
-                          {isPreparingPayment ? "Preparing secure payment..." : "Complete the shipping details, then continue to payment."}
+                          {isPreparingPayment ? "Preparing secure payment..." : "Complete the delivery details, then continue to payment."}
                         </div>
                       )}
 
@@ -1339,7 +1520,7 @@ function Index() {
             <button onClick={() => scrollToSection("philosophy")} className="text-muted-foreground hover:text-brand-white transition-colors text-left">
               Philosophy
             </button>
-            <a href="mailto:hello@thedivinewithin.com" className="text-muted-foreground hover:text-brand-white transition-colors">
+            <a href="mailto:thedivinewithin1@gmail.com" className="text-muted-foreground hover:text-brand-white transition-colors">
               Contact Us
             </a>
             <Link to="/admin" className="text-muted-foreground hover:text-brand-white transition-colors">
@@ -1357,14 +1538,46 @@ function Index() {
               </div>
             </div>
             <div className="pt-4">
-              <form className="flex border-b border-white/20" onSubmit={(e) => e.preventDefault()}>
+              <form
+                className={`flex border-b transition-colors ${
+                  isSubscribed ? "border-brand-red" : subscribeError ? "border-brand-red" : "border-white/20"
+                }`}
+                onSubmit={handleStockSignup}
+              >
                 <input
                   type="email"
+                  value={subscriberEmail}
+                  onChange={(event) => {
+                    setSubscriberEmail(event.target.value);
+                    setSubscribeError("");
+                    setSubscribeStatus("");
+                    setIsSubscribed(false);
+                  }}
                   placeholder="Join the tribe (Email)"
+                  aria-label="Email for stock updates"
                   className="bg-transparent py-2 text-sm w-full outline-none focus:placeholder-transparent transition-all text-brand-white placeholder:text-muted-foreground"
                 />
-                <button type="submit" className="text-brand-red font-bold text-xl">→</button>
+                <button
+                  type="submit"
+                  disabled={isSubscribing}
+                  className={`font-bold text-xl disabled:opacity-60 transition-colors ${
+                    isSubscribed ? "text-brand-white" : "text-brand-red"
+                  }`}
+                >
+                  {isSubscribing ? "..." : isSubscribed ? "✓" : "→"}
+                </button>
               </form>
+              <div aria-live="polite">
+                {isSubscribed && (
+                  <p className="mt-3 rounded border border-brand-red/40 bg-brand-red/10 px-3 py-2 text-xs uppercase tracking-widest text-brand-red">
+                    You are in. We will email you when new stock drops.
+                  </p>
+                )}
+                {!isSubscribed && subscribeStatus && (
+                  <p className="mt-3 text-xs text-brand-red uppercase tracking-widest">{subscribeStatus}</p>
+                )}
+                {subscribeError && <p className="mt-3 text-xs text-brand-red uppercase tracking-widest">{subscribeError}</p>}
+              </div>
             </div>
           </div>
         </div>
