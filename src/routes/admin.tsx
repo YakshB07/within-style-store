@@ -4,7 +4,7 @@ import { getRequestIP, useSession } from "@tanstack/react-start/server";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { SIZES, stockLabel, useInventory } from "@/lib/inventory";
-import { sendRestockUpdateEmails } from "@/lib/stock-updates";
+import { queueRestockUpdateEmail } from "@/lib/stock-updates";
 import { isRateLimited, sanitizeText } from "@/lib/security";
 
 export const Route = createFileRoute("/admin")({
@@ -89,7 +89,7 @@ const sendRestockNotification = createServerFn({ method: "POST" })
     }),
   )
   .handler(async ({ data }) => {
-    return sendRestockUpdateEmails(data);
+    return queueRestockUpdateEmail(data);
   });
 
 function AdminInventory() {
@@ -160,11 +160,9 @@ function AdminInventory() {
           },
         });
 
-        if (result?.success && typeof result.sentCount === "number") {
+        if (result?.success && typeof result.queuedCount === "number") {
           setRestockMessage(
-            result.sentCount > 0
-              ? `Restock update sent to ${result.sentCount} subscriber${result.sentCount === 1 ? "" : "s"}.`
-              : "Stock updated. No subscribers to notify yet.",
+            `Restock queued. We will send one combined email in about ${result.sendsInSeconds}s (${result.queuedCount} item${result.queuedCount === 1 ? "" : "s"} queued).`,
           );
         }
       } catch (notifyError) {
