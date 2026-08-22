@@ -1329,7 +1329,7 @@ function Index() {
                     <span>${total.toFixed(2)}</span>
                   </div>
 
-                  <form onSubmit={(event) => void handlePreparePayment(event)} noValidate className="space-y-4 border-t border-white/10 pt-6">
+                  <div className="space-y-4 border-t border-white/10 pt-6">
                     <div className="grid sm:grid-cols-2 gap-4">
                       <div>
                         <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
@@ -1619,7 +1619,7 @@ function Index() {
                         {isPreparingPayment ? "Preparing Payment..." : "Continue to Payment"}
                       </button>
                     )}
-                  </form>
+                  </div>
                 </aside>
               </div>
             )}
