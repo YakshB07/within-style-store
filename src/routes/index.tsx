@@ -1725,7 +1725,7 @@ function Index() {
           </div>
         </div>
         <div className="flex flex-col md:flex-row justify-between items-center gap-4 text-[10px] text-muted-foreground uppercase tracking-widest">
-          <p>© 2024 The Divine Within. All rights reserved.</p>
+          <p>© 2026 The Divine Within. All rights reserved.</p>
           <p>Made for the seekers.</p>
         </div>
       </footer>
