@@ -42,7 +42,7 @@ const products = [
     name: "Agni Pullover",
     type: "Pullover",
     normalPrice: 100,
-    salePrice: 0.5,
+    salePrice: 1,
     description: "Oversized Fit, Embroidered Mantra",
     image: pulloverHoodie,
     imageAlt: "Black Agni pullover hoodie with red Hindu mantra embroidery",
