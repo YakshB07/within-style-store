@@ -42,7 +42,7 @@ const products = [
     name: "Agni Pullover",
     type: "Pullover",
     normalPrice: 100,
-    salePrice: 70,
+    salePrice: 0.05,
     description: "Oversized Fit, Embroidered Mantra",
     image: pulloverHoodie,
     imageAlt: "Black Agni pullover hoodie with red Hindu mantra embroidery",
@@ -51,6 +51,28 @@ const products = [
 ];
 
 const ORDERS_STORAGE_KEY = "tdw-orders-v1";
+type PaymentProcessingStore = {
+  completedPaymentIntents: Set<string>;
+  inFlightPaymentIntents: Set<string>;
+};
+
+const getPaymentProcessingStore = (): PaymentProcessingStore => {
+  const globalState = globalThis as typeof globalThis & {
+    __tdwPaymentProcessingStore?: PaymentProcessingStore;
+  };
+
+  if (!globalState.__tdwPaymentProcessingStore) {
+    globalState.__tdwPaymentProcessingStore = {
+      completedPaymentIntents: new Set<string>(),
+      inFlightPaymentIntents: new Set<string>(),
+    };
+  }
+
+  return globalState.__tdwPaymentProcessingStore;
+};
+
+const toCents = (amount: number) => Math.max(0, Math.round(amount * 100));
+
 const PICKUP_LOCATION = {
   name: "Lambton Hall, Western University",
   addressLine1: "40 University Dr",
@@ -209,6 +231,8 @@ const sendOrderEmail = createServerFn({ method: "POST" })
   .validator(
     z.object({
       id: z.string(),
+      paymentIntentId: z.string().min(1),
+      expectedTotal: z.number().min(0),
       fulfillmentMethod: z.enum(["shipping", "pickup"]),
       customer: z.object({
         firstName: z.string(),
@@ -250,6 +274,55 @@ const sendOrderEmail = createServerFn({ method: "POST" })
     }),
   )
   .handler(async ({ data }) => {
+    const processingStore = getPaymentProcessingStore();
+    const normalizedPaymentIntentId = data.paymentIntentId.trim();
+
+    if (processingStore.completedPaymentIntents.has(normalizedPaymentIntentId)) {
+      return { success: true, emailSent: false, alreadyProcessed: true };
+    }
+
+    if (processingStore.inFlightPaymentIntents.has(normalizedPaymentIntentId)) {
+      return { success: false, reason: "already-processing" as const };
+    }
+
+    processingStore.inFlightPaymentIntents.add(normalizedPaymentIntentId);
+
+    const stripeSecretKey = process.env["STRIPE_SECRET_KEY"]?.trim();
+    if (!stripeSecretKey) {
+      processingStore.inFlightPaymentIntents.delete(normalizedPaymentIntentId);
+      return { success: false, reason: "missing-stripe-config" as const };
+    }
+
+    try {
+      const Stripe = (await import("stripe")).default;
+      const stripe = new Stripe(stripeSecretKey, {
+        apiVersion: "2026-07-29.dahlia",
+      });
+
+      const paymentIntent = await stripe.paymentIntents.retrieve(normalizedPaymentIntentId);
+      const paidAmountInCents =
+        typeof paymentIntent.amount_received === "number" && paymentIntent.amount_received > 0
+          ? paymentIntent.amount_received
+          : paymentIntent.amount;
+      const expectedAmountInCents = toCents(data.expectedTotal);
+
+      if (paymentIntent.status !== "succeeded") {
+        return { success: false, reason: "payment-not-verified" as const };
+      }
+
+      if ((paymentIntent.currency ?? "").toLowerCase() !== "cad") {
+        return { success: false, reason: "payment-currency-mismatch" as const };
+      }
+
+      if (paidAmountInCents < expectedAmountInCents) {
+        return { success: false, reason: "payment-amount-mismatch" as const };
+      }
+
+      const intentOrderId = paymentIntent.metadata?.["orderId"];
+      if (intentOrderId && intentOrderId !== data.id) {
+        return { success: false, reason: "payment-order-mismatch" as const };
+      }
+
     const orderLines = data.items
       .map((item) => `- ${item.name} | Size ${item.size} | $${item.price}`)
       .join("\n");
@@ -306,35 +379,58 @@ const sendOrderEmail = createServerFn({ method: "POST" })
     const toAddress = process.env["ORDER_EMAIL_TO"]?.trim() ?? "OPinox007@gmail.com";
     const fromAddress = process.env["SMTP_FROM"]?.trim() ?? smtpUser ?? "no-reply@thedivinewithin.com";
 
-    if (!smtpHost || !smtpUser || !smtpPass) {
-      console.warn("Order email skipped because SMTP environment variables are not configured.");
-      return { success: false, reason: "missing-smtp-config" };
+      if (!smtpHost || !smtpUser || !smtpPass) {
+        console.warn("Order email skipped because SMTP environment variables are not configured.");
+        processingStore.completedPaymentIntents.add(normalizedPaymentIntentId);
+        return { success: true, emailSent: false, reason: "missing-smtp-config" as const };
+      }
+
+      const transporter = nodemailer.createTransport({
+        host: smtpHost,
+        port: smtpPort,
+        secure: smtpPort === 465,
+        auth: {
+          user: smtpUser,
+          pass: smtpPass,
+        },
+        requireTLS: true,
+        tls: {
+          rejectUnauthorized: false,
+        },
+      });
+
+      try {
+        await transporter.verify();
+        await transporter.sendMail({
+          from: fromAddress,
+          to: toAddress,
+          replyTo: data.customer.email,
+          subject: `New order from ${data.customer.firstName} ${data.customer.lastName}`,
+          text,
+        });
+      } catch (error) {
+        console.error("Order email failed after verified payment:", error);
+        processingStore.completedPaymentIntents.add(normalizedPaymentIntentId);
+        return {
+          success: true,
+          emailSent: false,
+          reason: "email-send-failed" as const,
+          message: error instanceof Error ? error.message : "Unknown SMTP error",
+        };
+      }
+
+      processingStore.completedPaymentIntents.add(normalizedPaymentIntentId);
+      return { success: true, emailSent: true, reason: "email-sent" as const };
+    } catch (error) {
+      console.error("Payment verification failed before order finalization:", error);
+      return {
+        success: false,
+        reason: "stripe-verify-failed" as const,
+        message: error instanceof Error ? error.message : "Unknown Stripe verification error",
+      };
+    } finally {
+      processingStore.inFlightPaymentIntents.delete(normalizedPaymentIntentId);
     }
-
-    const transporter = nodemailer.createTransport({
-      host: smtpHost,
-      port: smtpPort,
-      secure: smtpPort === 465,
-      auth: {
-        user: smtpUser,
-        pass: smtpPass,
-      },
-      requireTLS: true,
-      tls: {
-        rejectUnauthorized: false,
-      },
-    });
-
-    await transporter.verify();
-    await transporter.sendMail({
-      from: fromAddress,
-      to: toAddress,
-      replyTo: data.customer.email,
-      subject: `New order from ${data.customer.firstName} ${data.customer.lastName}`,
-      text,
-    });
-
-    return { success: true };
   });
 
 const subscribeToStockUpdates = createServerFn({ method: "POST" })
@@ -366,7 +462,7 @@ const stripePromise = import.meta.env["VITE_STRIPE_PUBLISHABLE_KEY"]
 
 type CheckoutPaymentFormProps = {
   clientSecret: string;
-  onSubmitOrder: () => Promise<void>;
+  onSubmitOrder: (paymentIntentId: string) => Promise<void>;
   paymentError: string;
   setPaymentError: (message: string) => void;
 };
@@ -407,7 +503,13 @@ function CheckoutPaymentForm({ clientSecret, onSubmitOrder, paymentError, setPay
         return;
       }
 
-      await onSubmitOrder();
+      const confirmedPaymentIntentId = result.paymentIntent.id;
+      if (!confirmedPaymentIntentId) {
+        setPaymentError("Payment was approved but we could not confirm your receipt. Please contact support.");
+        return;
+      }
+
+      await onSubmitOrder(confirmedPaymentIntentId);
     } finally {
       setIsSubmitting(false);
     }
@@ -626,10 +728,13 @@ function Index() {
     }
   }, [checkout.postalCode, checkout.province, fulfillmentMethod, clientSecret]);
 
-  const handlePlaceOrder = async () => {
+  const handlePlaceOrder = async (paymentIntentId: string) => {
     if (!cart.length) return;
     if (!orderId) {
       setPaymentError("A valid order ID was not created. Please try again.");
+      return;
+    }
+    if (isProcessingOrder) {
       return;
     }
 
@@ -666,6 +771,37 @@ function Index() {
     setIsProcessingOrder(true);
 
     try {
+      const paymentVerification = await sendEmail({
+        data: {
+          ...orderRecord,
+          paymentIntentId,
+          expectedTotal: total,
+        },
+      });
+
+      if (!paymentVerification?.success) {
+        if (paymentVerification?.reason === "payment-not-verified") {
+          setPaymentError("Your payment is still processing. Please wait a moment and try again.");
+        } else if (paymentVerification?.reason === "payment-amount-mismatch") {
+          setPaymentError("Payment amount mismatch detected. Please contact support before retrying.");
+        } else if (paymentVerification?.reason === "payment-order-mismatch") {
+          setPaymentError("Payment verification failed for this order. Please contact support.");
+        } else if (paymentVerification?.reason === "payment-currency-mismatch") {
+          setPaymentError("Payment currency mismatch detected. Please contact support.");
+        } else if (paymentVerification?.reason === "already-processing") {
+          setPaymentError("Your payment is already being finalized. Please wait a moment.");
+        } else if (paymentVerification?.reason === "stripe-verify-failed") {
+          setPaymentError("We could not verify your payment right now. Please try again in a moment.");
+        } else {
+          setPaymentError("We could not verify your payment right now. Please contact support.");
+        }
+        return;
+      }
+
+      if (paymentVerification.emailSent === false) {
+        console.warn("Order completed but notification email was not sent:", paymentVerification.reason);
+      }
+
       try {
         const savedOrdersRaw = localStorage.getItem(ORDERS_STORAGE_KEY);
         const savedOrders = savedOrdersRaw ? JSON.parse(savedOrdersRaw) : [];
@@ -689,15 +825,6 @@ function Index() {
           setStock(productId, size as Size, Math.max(0, currentQty - qty));
         });
       });
-
-      try {
-        const result = await sendEmail({ data: orderRecord });
-        if (result?.success === false && result?.reason === "missing-smtp-config") {
-          console.warn("Order email skipped because SMTP environment variables are not configured.");
-        }
-      } catch (error) {
-        console.error("Order email failed:", error);
-      }
 
       setRecentOrder(orderRecord);
       setCart([]);
@@ -1202,7 +1329,7 @@ function Index() {
                     <span>${total.toFixed(2)}</span>
                   </div>
 
-                  <form onSubmit={handlePlaceOrder} noValidate className="space-y-4 border-t border-white/10 pt-6">
+                  <form onSubmit={(event) => void handlePreparePayment(event)} noValidate className="space-y-4 border-t border-white/10 pt-6">
                     <div className="grid sm:grid-cols-2 gap-4">
                       <div>
                         <label className="block text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">
