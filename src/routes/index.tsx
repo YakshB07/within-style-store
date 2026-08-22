@@ -207,9 +207,7 @@ const createStripePaymentIntent = createServerFn({ method: "POST" })
           orderId: data.orderId,
         },
         ...(data.email ? { receipt_email: data.email } : {}),
-        automatic_payment_methods: {
-          enabled: true,
-        },
+        payment_method_types: ["card"],
       });
 
       return {
@@ -484,6 +482,14 @@ function CheckoutPaymentForm({ clientSecret, onSubmitOrder, paymentError, setPay
     setPaymentError("");
 
     try {
+      const validationResult = await elements.submit();
+      if (validationResult.error) {
+        setPaymentError(
+          validationResult.error.message ?? "Please complete your payment details before placing the order.",
+        );
+        return;
+      }
+
       const result = await stripe.confirmPayment({
         elements,
         clientSecret,
